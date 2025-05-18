@@ -109,12 +109,33 @@ async fn test_create_user_account_negative_balance() {
 #[tokio::test]
 async fn test_get_current_user_success() {
     let pool = setup_test_db().await;
+
+    // Create a test account for the user since we now return account details
+    let user_id = "test_user_id".to_string();
+    let currency = "INR";
+    let balance = 1000.0;
+
+    sqlx::query!(
+        r#"
+        INSERT INTO accounts (id, currency, balance, created_at, updated_at)
+        VALUES (?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+        "#,
+        user_id,
+        currency,
+        balance
+    )
+    .execute(&pool)
+    .await
+    .expect("Failed to create test account");
+
     let jwt_auth = JwtAuth::new(b"test_secret");
     let auth_user = create_test_auth_user();
-    let expected_user_id = auth_user.user_id.clone();
 
     let result = get_current_user(State((pool, jwt_auth)), auth_user).await;
 
     assert!(result.is_ok(), "Getting current user should succeed");
-    assert_eq!(result.unwrap().0, expected_user_id);
+    let account = result.unwrap().0;
+    assert_eq!(account.id, "test_user_id");
+    assert_eq!(account.currency, currency);
+    assert_eq!(account.balance, balance);
 }

@@ -391,19 +391,25 @@ paths:
 
   /api/protected/users/me:
     get:
-      summary: Get user profile
-      description: Returns the current user's profile information
+      summary: Get user account details
+      description: Returns the current user's account details
       security:
         - bearerAuth: []
       responses:
         '200':
-          description: User profile
+          description: User account details
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/User'
+                $ref: '#/components/schemas/Account'
         '401':
           description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: Account not found
           content:
             application/json:
               schema:

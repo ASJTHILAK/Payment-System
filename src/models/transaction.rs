@@ -15,7 +15,7 @@ pub struct Transaction {
     pub updated_at: NaiveDateTime,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, PartialEq)]
 pub enum TransactionStatus {
     Pending,
     Completed,
