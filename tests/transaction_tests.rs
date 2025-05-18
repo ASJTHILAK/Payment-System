@@ -3,7 +3,7 @@ use payment_system::{
     db::DbPool,
     handlers::transaction::{create, list},
     middleware::{auth::JwtAuth, AuthUser},
-    models::CreateTransactionRequest,
+    models::{CreateTransactionRequest, TransactionStatus},
 };
 use sqlx;
 
@@ -102,6 +102,11 @@ async fn test_create_transaction_success() {
     assert_eq!(transaction.amount, 1000.0);
     assert_eq!(transaction.currency, "INR");
     assert_eq!(transaction.description.unwrap(), "Test transaction");
+    assert_eq!(
+        transaction.status,
+        TransactionStatus::Completed,
+        "Transaction status should be Completed after processing"
+    );
 }
 
 #[tokio::test]
