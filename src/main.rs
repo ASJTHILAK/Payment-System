@@ -3,11 +3,15 @@ mod handlers;
 mod middleware;
 mod models;
 
-use crate::middleware::{auth::JwtAuth, AuthUser};
+use crate::middleware::{
+    auth::JwtAuth,
+    rate_limit::{ip_rate_limiter, IpRateLimiter},
+    AuthUser,
+};
 use axum::{routing::get, Router};
 use dotenv::dotenv;
 use sqlx::sqlite::SqlitePoolOptions;
-use std::env;
+use std::{env, net::SocketAddr};
 use tower_http::trace::TraceLayer;
 use tracing::{debug, error, info};
 
@@ -33,20 +37,48 @@ pub async fn create_app() -> Router {
     let jwt_auth = JwtAuth::new(jwt_secret.as_bytes());
     debug!("JWT authentication initialized");
 
+    // Configure rate limiters
+    // Parse rate limit configuration from environment or use defaults
+    let global_rate_limit = env::var("GLOBAL_RATE_LIMIT")
+        .map(|v| v.parse::<usize>().unwrap_or(300))
+        .unwrap_or(300); // Default: 300 requests per minute globally
+
+    let auth_rate_limit = env::var("AUTH_RATE_LIMIT")
+        .map(|v| v.parse::<usize>().unwrap_or(30))
+        .unwrap_or(30); // Default: 30 requests per minute for auth endpoints
+
+    // Create IP-based rate limiters for specific endpoints
+    let auth_ip_limiter = IpRateLimiter::with_config(auth_rate_limit, 60);
+    let global_ip_limiter = IpRateLimiter::with_config(global_rate_limit, 60);
+
+    debug!(
+        "Rate limiters configured: global={}/min, auth={}/min",
+        global_rate_limit, auth_rate_limit
+    );
+
     // Create router with routes
     debug!("Setting up API routes");
     Router::new()
         .route(
             "/health",
             get(|| async {
-                debug!("Health check request received");
+                debug!("Health check received");
                 "OK"
             }),
         )
         .nest(
             "/api",
             Router::new()
-                .nest("/auth", handlers::auth::router())
+                .nest(
+                    "/auth",
+                    handlers::auth::router()
+                        // Apply stricter rate limiting to authentication endpoints
+                        .layer(axum::middleware::from_fn_with_state(
+                            auth_ip_limiter.clone(),
+                            ip_rate_limiter,
+                        ))
+                        .layer(axum::Extension(auth_ip_limiter)),
+                )
                 // Protected routes with auth middleware
                 .nest(
                     "/protected",
@@ -57,6 +89,12 @@ pub async fn create_app() -> Router {
                 )
                 .layer(axum::Extension(jwt_auth.clone())),
         )
+        // Apply global IP-based rate limiting
+        .layer(axum::middleware::from_fn_with_state(
+            global_ip_limiter.clone(),
+            ip_rate_limiter,
+        ))
+        .layer(axum::Extension(global_ip_limiter))
         .layer(TraceLayer::new_for_http())
         .with_state((pool, jwt_auth.clone()))
 }
@@ -89,7 +127,7 @@ async fn main() -> anyhow::Result<()> {
     info!("Starting server on {}", addr);
 
     match axum::Server::bind(&addr)
-        .serve(app.into_make_service())
+        .serve(app.into_make_service_with_connect_info::<SocketAddr>())
         .await
     {
         Ok(_) => info!("Server shutdown gracefully"),

@@ -10,6 +10,7 @@ A modern, secure RESTful API for digital payments built with Rust and Axum.
 - **Validation**: Comprehensive input validation for all endpoints
 - **Error Handling**: Detailed error responses for client applications
 - **Database**: SQLite persistence with SQLx for type-safe queries
+- **Rate Limiting**: IP-based rate limiting to prevent abuse and ensure service stability
 
 ## Tech Stack
 
@@ -55,7 +56,12 @@ Create a `.env` file in the project root:
 DATABASE_URL="sqlite:data.db"
 JWT_SECRET="asjthilak"
 PORT=3000
+GLOBAL_RATE_LIMIT=300
+AUTH_RATE_LIMIT=30
 ```
+
+- `GLOBAL_RATE_LIMIT`: Maximum requests allowed per minute globally (default: 300)
+- `AUTH_RATE_LIMIT`: Maximum requests allowed per minute for authentication endpoints (default: 30)
 
 ### Running Locally
 
