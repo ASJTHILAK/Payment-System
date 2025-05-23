@@ -4,7 +4,7 @@ use uuid::Uuid;
 
 use crate::{
     db::{DbError, DbResult},
-    models::{Account, Transaction, TransactionStatus},
+    models::{Transaction, TransactionStatus},
     services::{
         compliance::{ComplianceService, ComplianceStatus},
         exchange_rate::ExchangeRateService,
@@ -28,76 +28,21 @@ pub async fn process_cross_border_transaction(
         from_account_id, to_account_id, amount, currency, convert_currency
     );
 
-    // First get accounts before starting transaction
-    // Get sender's account
-    let from_account = sqlx::query_as!(
-        Account,
-        r#"
-        SELECT 
-            id as "id!", 
-            balance as "balance!", 
-            currency as "currency!",
-            country,
-            created_at as "created_at!", 
-            updated_at as "updated_at!"
-        FROM accounts 
-        WHERE id = ?
-        "#,
-        from_account_id
-    )
-    .fetch_optional(pool)
-    .await
-    .map_err(|e| {
-        error!(
-            "Database error fetching sender account {}: {}",
-            from_account_id, e
-        );
-        DbError::from(e)
-    })?
-    .ok_or_else(|| {
-        error!("Sender account not found: {}", from_account_id);
-        DbError::from("Sender account not found")
-    })?;
+    // Validate accounts and transaction parameters
+    let (from_account, to_account) =
+        crate::db::validate_transaction(pool, from_account_id, to_account_id, amount, currency)
+            .await?;
 
-    // Get recipient's account
-    let to_account = sqlx::query_as!(
-        Account,
-        r#"
-        SELECT 
-            id as "id!", 
-            balance as "balance!", 
-            currency as "currency!",
-            country,
-            created_at as "created_at!", 
-            updated_at as "updated_at!"
-        FROM accounts 
-        WHERE id = ?
-        "#,
-        to_account_id
-    )
-    .fetch_optional(pool)
-    .await
-    .map_err(|e| {
-        error!(
-            "Database error fetching recipient account {}: {}",
-            to_account_id, e
-        );
-        DbError::from(e)
-    })?
-    .ok_or_else(|| {
-        error!("Recipient account not found: {}", to_account_id);
-        DbError::from("Recipient account not found")
-    })?;
-
-    // Check if the sender has sufficient funds in their currency
-    if from_account.currency != currency {
+    // For cross-border transactions, we don't immediately check recipient currency
+    // as it might need conversion
+    if !convert_currency && to_account.currency != currency {
         return Err(DbError::from(format!(
-            "Currency mismatch: account uses {} but transaction is in {}",
-            from_account.currency, currency
+            "Currency mismatch: recipient account uses {} but transaction is in {}",
+            to_account.currency, currency
         )));
     }
 
-    // Check if sender has sufficient balance
+    // Additional validation for cross-border compliance
     if from_account.balance < amount {
         return Err(DbError::from("Insufficient balance"));
     }

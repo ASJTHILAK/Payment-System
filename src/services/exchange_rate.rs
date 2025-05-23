@@ -46,9 +46,8 @@ impl ExchangeRateService {
         if let Some(rate) = self.get_cached_rate(from_currency, to_currency).await? {
             // Check if rate is still fresh (less than 24 hours old)
             let now = chrono::Utc::now().naive_utc();
-            let one_day = chrono::Duration::hours(24);
 
-            if now.signed_duration_since(rate.last_updated_at) < one_day {
+            if now.signed_duration_since(rate.last_updated_at) < chrono::Duration::hours(6) {
                 debug!(
                     "Using cached exchange rate: {} to {} = {}",
                     from_currency, to_currency, rate.rate

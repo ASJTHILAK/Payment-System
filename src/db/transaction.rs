@@ -4,7 +4,7 @@ use uuid::Uuid;
 
 use crate::{
     db::error::{DbError, DbResult},
-    models::{Account, Transaction, TransactionStatus},
+    models::{Transaction, TransactionStatus},
 };
 
 /// This function handles the entire transaction process within a database transaction
@@ -22,76 +22,16 @@ pub async fn process_transaction(
         from_account_id, to_account_id, amount, currency
     );
 
-    // First get accounts before starting transaction
-    // Get sender's account
-    let from_account = sqlx::query_as!(
-        Account,
-        r#"
-        SELECT 
-            id as "id!", 
-            balance as "balance!", 
-            currency as "currency!",
-            country,
-            created_at as "created_at!", 
-            updated_at as "updated_at!"
-        FROM accounts 
-        WHERE id = ?
-        "#,
-        from_account_id
-    )
-    .fetch_optional(pool)
-    .await
-    .map_err(|e| {
-        error!(
-            "Database error fetching sender account {}: {}",
-            from_account_id, e
-        );
-        DbError::from(e)
-    })?
-    .ok_or_else(|| {
-        error!("Sender account not found: {}", from_account_id);
-        DbError::from("Sender account not found")
-    })?;
+    // Validate accounts and transaction parameters
+    let (from_account, to_account) =
+        crate::db::validate_transaction(pool, from_account_id, to_account_id, amount, currency)
+            .await?;
 
-    // Get recipient's account
-    let to_account = sqlx::query_as!(
-        Account,
-        r#"
-        SELECT 
-            id as "id!", 
-            balance as "balance!", 
-            currency as "currency!",
-            country,
-            created_at as "created_at!", 
-            updated_at as "updated_at!"
-        FROM accounts 
-        WHERE id = ?
-        "#,
-        to_account_id
-    )
-    .fetch_optional(pool)
-    .await
-    .map_err(|e| {
-        error!(
-            "Database error fetching recipient account {}: {}",
-            to_account_id, e
-        );
-        DbError::from(e)
-    })?
-    .ok_or_else(|| {
-        error!("Recipient account not found: {}", to_account_id);
-        DbError::from("Recipient account not found")
-    })?;
-
-    // Validate transaction before starting database transaction
-    // Check if currencies match
-    if from_account.currency != currency || to_account.currency != currency {
-        return Err(DbError::from("Currency mismatch"));
-    }
-
-    // Check if sender has sufficient balance
-    if from_account.balance < amount {
-        return Err(DbError::from("Insufficient balance"));
+    // Additional validation for same-currency transactions
+    if to_account.currency != currency {
+        return Err(DbError::from(
+            "Currency mismatch: recipient account currency must match transaction currency",
+        ));
     }
 
     // Now that all validations are complete, start the database transaction

@@ -27,7 +27,10 @@ pub async fn create_app() -> Router {
     debug!("JWT secret loaded");
 
     let pool = SqlitePoolOptions::new()
-        .max_connections(5)
+        .max_connections(10)
+        .min_connections(1)
+        .acquire_timeout(std::time::Duration::from_secs(30))
+        .idle_timeout(std::time::Duration::from_secs(300))
         .connect(&database_url)
         .await
         .expect("Failed to create pool");
