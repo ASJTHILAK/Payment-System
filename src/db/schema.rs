@@ -104,22 +104,25 @@ pub async fn create_account(
     user_id: &str,
     currency: &str,
     initial_balance: f64,
+    country: Option<&str>,
 ) -> DbResult<Account> {
     debug!(
-        "Creating new account: user_id={}, currency={}, balance={}",
-        user_id, currency, initial_balance
+        "Creating new account: user_id={}, currency={}, balance={}, country={:?}",
+        user_id, currency, initial_balance, country
     );
 
     let now = chrono::Utc::now().naive_utc();
+    let country_code = country.unwrap_or("IN"); // Default to India if not specified
 
     sqlx::query!(
         r#"
-        INSERT INTO accounts (id, currency, balance, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?)
+        INSERT INTO accounts (id, currency, balance, country, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?)
         "#,
         user_id, // Using user_id as the account id
         currency,
         initial_balance,
+        country_code,
         now,
         now
     )
@@ -140,6 +143,7 @@ pub async fn create_account(
             id as "id!", 
             balance as "balance!", 
             currency as "currency!",
+            country,
             created_at as "created_at!", 
             updated_at as "updated_at!"
         FROM accounts WHERE id = ?
@@ -173,6 +177,7 @@ pub async fn get_account_by_id(pool: &SqlitePool, account_id: &str) -> DbResult<
             id as "id!", 
             balance as "balance!", 
             currency as "currency!",
+            country,
             created_at as "created_at!", 
             updated_at as "updated_at!"
         FROM accounts WHERE id = ?
@@ -215,6 +220,7 @@ pub async fn get_user_transactions(
             currency as "currency!",
             status as "status: TransactionStatus",
             description,
+            exchange_rate, original_amount, original_currency, is_cross_border,
             created_at as "created_at!", 
             updated_at as "updated_at!"
         FROM transactions

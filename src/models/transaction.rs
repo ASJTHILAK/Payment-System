@@ -13,6 +13,10 @@ pub struct Transaction {
     pub description: Option<String>,
     pub created_at: NaiveDateTime,
     pub updated_at: NaiveDateTime,
+    pub exchange_rate: Option<f64>,
+    pub original_amount: Option<f64>,
+    pub original_currency: Option<String>,
+    pub is_cross_border: Option<bool>,
 }
 
 #[derive(Debug, Serialize, Deserialize, PartialEq)]
@@ -81,6 +85,8 @@ pub struct CreateTransactionRequest {
     pub currency: String,
     #[validate(length(max = 200))]
     pub description: Option<String>,
+    // Allow sending in original currency even if recipient uses different currency
+    pub convert_currency: Option<bool>,
 }
 
 #[derive(Debug, Serialize, sqlx::FromRow)]
@@ -88,6 +94,7 @@ pub struct Account {
     pub id: String, // This is now the same as user_id
     pub balance: f64,
     pub currency: String,
+    pub country: Option<String>,
     pub created_at: NaiveDateTime,
     pub updated_at: NaiveDateTime,
 }
@@ -98,11 +105,15 @@ pub struct CreateAccountRequest {
     pub currency: String,
     #[validate(range(min = 0.0))]
     pub minimum_balance: f64,
+    #[validate(length(equal = 2))] // ISO 3166-1 alpha-2 country code
+    pub country: Option<String>,
 }
 
 fn validate_currency(currency: &str) -> Result<(), validator::ValidationError> {
-    if currency != "INR" {
-        return Err(validator::ValidationError::new("only_inr_allowed"));
+    // Allow multiple currencies for cross-border payments
+    let allowed_currencies = vec!["INR", "USD", "EUR", "GBP", "SGD", "AED"];
+    if !allowed_currencies.contains(&currency) {
+        return Err(validator::ValidationError::new("unsupported_currency"));
     }
     Ok(())
 }

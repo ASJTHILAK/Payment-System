@@ -55,6 +55,7 @@ async fn test_create_user_account_success() {
     let request = CreateAccountRequest {
         currency: "INR".to_string(),
         minimum_balance: 1000.0,
+        country: Some("IN".to_string()),
     };
 
     let result = create_user_account(State((pool, jwt_auth)), auth_user, Json(request)).await;
@@ -67,26 +68,6 @@ async fn test_create_user_account_success() {
 }
 
 #[tokio::test]
-async fn test_create_user_account_invalid_currency() {
-    let pool = setup_test_db().await;
-    let jwt_auth = JwtAuth::new(b"test_secret");
-    let auth_user = create_test_auth_user();
-
-    let request = CreateAccountRequest {
-        currency: "USD".to_string(), // Only INR is allowed
-        minimum_balance: 1000.0,
-    };
-
-    let result = create_user_account(State((pool, jwt_auth)), auth_user, Json(request)).await;
-
-    assert!(
-        result.is_err(),
-        "Account creation should fail with invalid currency"
-    );
-    assert!(result.unwrap_err().contains("Validation error"));
-}
-
-#[tokio::test]
 async fn test_create_user_account_negative_balance() {
     let pool = setup_test_db().await;
     let jwt_auth = JwtAuth::new(b"test_secret");
@@ -95,6 +76,7 @@ async fn test_create_user_account_negative_balance() {
     let request = CreateAccountRequest {
         currency: "INR".to_string(),
         minimum_balance: -100.0,
+        country: Some("IN".to_string()),
     };
 
     let result = create_user_account(State((pool, jwt_auth)), auth_user, Json(request)).await;
