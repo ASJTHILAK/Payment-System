@@ -2,6 +2,7 @@ mod db;
 mod handlers;
 mod middleware;
 mod models;
+mod services;
 
 use crate::middleware::{
     auth::JwtAuth,
@@ -56,6 +57,12 @@ pub async fn create_app() -> Router {
         global_rate_limit, auth_rate_limit
     );
 
+    // Initialize services
+    let exchange_rate_service = services::ExchangeRateService::new(pool.clone());
+    let compliance_service = services::ComplianceService::new(pool.clone());
+
+    debug!("Services initialized");
+
     // Create router with routes
     debug!("Setting up API routes");
     Router::new()
@@ -87,7 +94,9 @@ pub async fn create_app() -> Router {
                         .nest("/transactions", handlers::transaction::router())
                         .route_layer(axum::middleware::from_extractor::<AuthUser>()),
                 )
-                .layer(axum::Extension(jwt_auth.clone())),
+                .layer(axum::Extension(jwt_auth.clone()))
+                .layer(axum::Extension(exchange_rate_service))
+                .layer(axum::Extension(compliance_service)),
         )
         // Apply global IP-based rate limiting
         .layer(axum::middleware::from_fn_with_state(

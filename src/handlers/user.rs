@@ -34,12 +34,13 @@ pub async fn create_user_account(
         return Err(format!("Validation error: {:?}", errors));
     }
 
-    // Create account with minimum balance
+    // Create account with minimum balance and country info
     let account = create_account(
         &pool,
         &auth_user.user_id,
         &payload.currency,
         payload.minimum_balance,
+        payload.country.as_deref(),
     )
     .await
     .map_err(|e: DbError| {

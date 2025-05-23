@@ -22,13 +22,8 @@ pub async fn process_transaction(
         from_account_id, to_account_id, amount, currency
     );
 
-    // Start a database transaction to ensure atomicity
-    let mut tx = pool.begin().await.map_err(|e| {
-        error!("Failed to begin database transaction: {}", e);
-        DbError::from(e)
-    })?;
-
-    // Get sender's account with the latest data inside the transaction
+    // First get accounts before starting transaction
+    // Get sender's account
     let from_account = sqlx::query_as!(
         Account,
         r#"
@@ -36,6 +31,7 @@ pub async fn process_transaction(
             id as "id!", 
             balance as "balance!", 
             currency as "currency!",
+            country,
             created_at as "created_at!", 
             updated_at as "updated_at!"
         FROM accounts 
@@ -43,7 +39,7 @@ pub async fn process_transaction(
         "#,
         from_account_id
     )
-    .fetch_optional(&mut *tx)
+    .fetch_optional(pool)
     .await
     .map_err(|e| {
         error!(
@@ -57,7 +53,7 @@ pub async fn process_transaction(
         DbError::from("Sender account not found")
     })?;
 
-    // Get recipient's account with the latest data inside the transaction
+    // Get recipient's account
     let to_account = sqlx::query_as!(
         Account,
         r#"
@@ -65,6 +61,7 @@ pub async fn process_transaction(
             id as "id!", 
             balance as "balance!", 
             currency as "currency!",
+            country,
             created_at as "created_at!", 
             updated_at as "updated_at!"
         FROM accounts 
@@ -72,7 +69,7 @@ pub async fn process_transaction(
         "#,
         to_account_id
     )
-    .fetch_optional(&mut *tx)
+    .fetch_optional(pool)
     .await
     .map_err(|e| {
         error!(
@@ -86,17 +83,22 @@ pub async fn process_transaction(
         DbError::from("Recipient account not found")
     })?;
 
+    // Validate transaction before starting database transaction
     // Check if currencies match
     if from_account.currency != currency || to_account.currency != currency {
-        tx.rollback().await.map_err(DbError::from)?;
         return Err(DbError::from("Currency mismatch"));
     }
 
     // Check if sender has sufficient balance
     if from_account.balance < amount {
-        tx.rollback().await.map_err(DbError::from)?;
         return Err(DbError::from("Insufficient balance"));
     }
+
+    // Now that all validations are complete, start the database transaction
+    let mut tx = pool.begin().await.map_err(|e| {
+        error!("Failed to begin database transaction: {}", e);
+        DbError::from(e)
+    })?;
 
     // Create a transaction record
     let id = Uuid::new_v4().to_string();
@@ -248,6 +250,7 @@ pub async fn process_transaction(
             currency as "currency!",
             status as "status: TransactionStatus",
             description,
+            exchange_rate, original_amount, original_currency, is_cross_border,
             created_at as "created_at!", 
             updated_at as "updated_at!"
         FROM transactions 

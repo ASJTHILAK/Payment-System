@@ -1,11 +1,23 @@
-use axum::{extract::State, Json};
+use axum::{extract::State, Extension, Json};
 use payment_system::{
     db::DbPool,
     handlers::transaction::{create, list},
     middleware::{auth::JwtAuth, AuthUser},
     models::{CreateTransactionRequest, TransactionStatus},
+    services::{compliance::ComplianceService, exchange_rate::ExchangeRateService},
 };
 use sqlx;
+use std::env;
+
+// Mock services
+fn create_test_exchange_rate_service(pool: DbPool) -> ExchangeRateService {
+    env::set_var("EXCHANGE_RATE_API_KEY", "test_key");
+    ExchangeRateService::new(pool.clone())
+}
+
+fn create_test_compliance_service(pool: DbPool) -> ComplianceService {
+    ComplianceService::new(pool.clone())
+}
 
 // Mock AuthUser for testing
 fn create_test_auth_user() -> AuthUser {
@@ -84,9 +96,20 @@ async fn test_create_transaction_success() {
         amount: 1000.0,
         currency: "INR".to_string(),
         description: Some("Test transaction".to_string()),
+        convert_currency: Some(false),
     };
 
-    let result = create(State((pool.clone(), jwt_auth)), auth_user, Json(request)).await;
+    let exchange_rate_service = create_test_exchange_rate_service(pool.clone());
+    let compliance_service = create_test_compliance_service(pool.clone());
+
+    let result = create(
+        State((pool.clone(), jwt_auth)),
+        auth_user,
+        Extension(exchange_rate_service),
+        Extension(compliance_service),
+        Json(request),
+    )
+    .await;
 
     assert!(result.is_ok(), "Transaction creation should succeed");
 
@@ -121,9 +144,20 @@ async fn test_create_transaction_insufficient_balance() {
         amount: 10000.0, // Higher than sender's balance
         currency: "INR".to_string(),
         description: None,
+        convert_currency: Some(false),
     };
 
-    let result = create(State((pool.clone(), jwt_auth)), auth_user, Json(request)).await;
+    let exchange_rate_service = create_test_exchange_rate_service(pool.clone());
+    let compliance_service = create_test_compliance_service(pool.clone());
+
+    let result = create(
+        State((pool.clone(), jwt_auth)),
+        auth_user,
+        Extension(exchange_rate_service),
+        Extension(compliance_service),
+        Json(request),
+    )
+    .await;
 
     assert!(
         result.is_err(),
@@ -143,9 +177,20 @@ async fn test_create_transaction_invalid_recipient() {
         amount: 1000.0,
         currency: "INR".to_string(),
         description: None,
+        convert_currency: Some(false),
     };
 
-    let result = create(State((pool.clone(), jwt_auth)), auth_user, Json(request)).await;
+    let exchange_rate_service = create_test_exchange_rate_service(pool.clone());
+    let compliance_service = create_test_compliance_service(pool.clone());
+
+    let result = create(
+        State((pool.clone(), jwt_auth)),
+        auth_user,
+        Extension(exchange_rate_service),
+        Extension(compliance_service),
+        Json(request),
+    )
+    .await;
 
     assert!(
         result.is_err(),
@@ -165,11 +210,17 @@ async fn test_list_transactions() {
         amount: 1000.0,
         currency: "INR".to_string(),
         description: Some("Test transaction".to_string()),
+        convert_currency: Some(false),
     };
+
+    let exchange_rate_service = create_test_exchange_rate_service(pool.clone());
+    let compliance_service = create_test_compliance_service(pool.clone());
 
     let create_result = create(
         State((pool.clone(), jwt_auth.clone())),
         auth_user.clone(),
+        Extension(exchange_rate_service),
+        Extension(compliance_service),
         Json(request),
     )
     .await;

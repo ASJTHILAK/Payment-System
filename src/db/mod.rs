@@ -1,8 +1,10 @@
-pub use error::DbError;
+pub use cross_border::process_cross_border_transaction;
+pub use error::{DbError, DbResult};
 pub use schema::*;
 use sqlx::SqlitePool;
 pub use transaction::process_transaction;
 
+mod cross_border;
 mod error;
 mod schema;
 mod transaction;
