@@ -6,20 +6,22 @@ use axum::{
 use tracing::{debug, error, info};
 use validator::Validate;
 
+use std::sync::Arc;
+
 use crate::{
-    db::{create_account, get_account_by_id, DbError, DbPool},
+    db::{connection::DbConnection, create_account, get_account_by_id, DbError},
     middleware::{auth::JwtAuth, AuthUser},
     models::{Account, CreateAccountRequest},
 };
 
-pub fn router() -> Router<(DbPool, JwtAuth)> {
+pub fn router() -> Router<(Arc<DbConnection>, JwtAuth)> {
     Router::new()
         .route("/accounts", post(create_user_account))
         .route("/me", get(get_current_user))
 }
 
 pub async fn create_user_account(
-    State((pool, _)): State<(DbPool, JwtAuth)>,
+    State((db_conn, _)): State<(Arc<DbConnection>, JwtAuth)>,
     auth_user: AuthUser,
     Json(payload): Json<CreateAccountRequest>,
 ) -> Result<Json<Account>, String> {
@@ -36,13 +38,12 @@ pub async fn create_user_account(
 
     // Create account with minimum balance and country info
     let account = create_account(
-        &pool,
+        &db_conn.get(),
         &auth_user.user_id,
         &payload.currency,
         payload.minimum_balance,
         payload.country.as_deref(),
     )
-    .await
     .map_err(|e: DbError| {
         error!(
             "Failed to create account for user {}: {}",
@@ -59,7 +60,7 @@ pub async fn create_user_account(
 }
 
 pub async fn get_current_user(
-    State((pool, _)): State<(DbPool, JwtAuth)>,
+    State((db_conn, _)): State<(Arc<DbConnection>, JwtAuth)>,
     auth_user: AuthUser,
 ) -> Result<Json<Account>, String> {
     debug!(
@@ -68,8 +69,7 @@ pub async fn get_current_user(
     );
 
     // Fetch the user's account details
-    let account = get_account_by_id(&pool, &auth_user.user_id)
-        .await
+    let account = get_account_by_id(&db_conn.get(), &auth_user.user_id)
         .map_err(|e: DbError| {
             error!(
                 "Database error fetching account for user {}: {}",

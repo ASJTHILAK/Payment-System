@@ -1,11 +1,12 @@
 use axum::{extract::State, Json};
 use payment_system::{
-    db::DbPool,
+    db::connection::DbConnection,
     handlers::user::{create_user_account, get_current_user},
     middleware::{auth::JwtAuth, AuthUser},
     models::CreateAccountRequest,
 };
-use sqlx;
+use std::sync::Arc;
+use tempfile::TempDir;
 
 // Mock AuthUser for testing
 fn create_test_auth_user() -> AuthUser {
@@ -14,41 +15,38 @@ fn create_test_auth_user() -> AuthUser {
     }
 }
 
-// Mock DbPool for testing
-async fn setup_test_db() -> DbPool {
-    let db_url = "sqlite::memory:";
-    let pool = sqlx::SqlitePool::connect(db_url)
-        .await
-        .expect("Failed to create test database");
+// Mock DbConnection for testing
+fn setup_test_db() -> Arc<DbConnection> {
+    // Create a temporary directory that persists for the test
+    let temp_dir = TempDir::new().expect("Failed to create temp dir");
+    let db_path = temp_dir.path().join("test.db");
+    let db_path_str = db_path.to_str().unwrap();
 
-    // Run migrations
-    sqlx::migrate!("./migrations")
-        .run(&pool)
-        .await
-        .expect("Failed to run migrations");
+    let db_conn = DbConnection::new(db_path_str).expect("Failed to create test database");
+
+    let db_conn = Arc::new(db_conn);
 
     // Create a test user since accounts are linked to users
-    let user_id = "test_user_id".to_string();
-    sqlx::query!(
-        r#"
-        INSERT INTO users (id, username, email, password_hash, created_at, updated_at)
-        VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
-        "#,
-        user_id,
-        "testuser",
-        "test@example.com",
-        "password_hash"
-    )
-    .execute(&pool)
-    .await
-    .expect("Failed to create test user");
+    let user_id = "test_user_id";
+    {
+        let conn = db_conn.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO users (id, username, email, password_hash, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
+            [user_id, "testuser", "test@example.com", "password_hash"],
+        )
+        .expect("Failed to create test user");
+    }
 
-    pool
+    // Keep the temp directory alive by storing it in the connection
+    std::mem::forget(temp_dir);
+
+    db_conn
 }
 
 #[tokio::test]
 async fn test_create_user_account_success() {
-    let pool = setup_test_db().await;
+    let db_conn = setup_test_db();
     let jwt_auth = JwtAuth::new(b"test_secret");
     let auth_user = create_test_auth_user();
 
@@ -58,7 +56,7 @@ async fn test_create_user_account_success() {
         country: Some("IN".to_string()),
     };
 
-    let result = create_user_account(State((pool, jwt_auth)), auth_user, Json(request)).await;
+    let result = create_user_account(State((db_conn, jwt_auth)), auth_user, Json(request)).await;
 
     assert!(result.is_ok(), "Account creation should succeed");
 
@@ -69,7 +67,7 @@ async fn test_create_user_account_success() {
 
 #[tokio::test]
 async fn test_create_user_account_negative_balance() {
-    let pool = setup_test_db().await;
+    let db_conn = setup_test_db();
     let jwt_auth = JwtAuth::new(b"test_secret");
     let auth_user = create_test_auth_user();
 
@@ -79,7 +77,7 @@ async fn test_create_user_account_negative_balance() {
         country: Some("IN".to_string()),
     };
 
-    let result = create_user_account(State((pool, jwt_auth)), auth_user, Json(request)).await;
+    let result = create_user_account(State((db_conn, jwt_auth)), auth_user, Json(request)).await;
 
     assert!(
         result.is_err(),
@@ -90,30 +88,27 @@ async fn test_create_user_account_negative_balance() {
 
 #[tokio::test]
 async fn test_get_current_user_success() {
-    let pool = setup_test_db().await;
+    let db_conn = setup_test_db();
 
     // Create a test account for the user since we now return account details
-    let user_id = "test_user_id".to_string();
+    let user_id = "test_user_id";
     let currency = "INR";
     let balance = 1000.0;
 
-    sqlx::query!(
-        r#"
-        INSERT INTO accounts (id, currency, balance, created_at, updated_at)
-        VALUES (?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
-        "#,
-        user_id,
-        currency,
-        balance
-    )
-    .execute(&pool)
-    .await
-    .expect("Failed to create test account");
+    {
+        let conn = db_conn.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO accounts (id, currency, balance, created_at, updated_at)
+             VALUES (?1, ?2, ?3, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
+            [user_id, currency, &balance.to_string()],
+        )
+        .expect("Failed to create test account");
+    }
 
     let jwt_auth = JwtAuth::new(b"test_secret");
     let auth_user = create_test_auth_user();
 
-    let result = get_current_user(State((pool, jwt_auth)), auth_user).await;
+    let result = get_current_user(State((db_conn, jwt_auth)), auth_user).await;
 
     assert!(result.is_ok(), "Getting current user should succeed");
     let account = result.unwrap().0;

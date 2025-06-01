@@ -1,4 +1,4 @@
-use sqlx::SqlitePool;
+use std::sync::{Arc, Mutex};
 use tracing::{debug, error, info};
 use uuid::Uuid;
 
@@ -9,11 +9,12 @@ use crate::{
         compliance::{ComplianceService, ComplianceStatus},
         exchange_rate::ExchangeRateService,
     },
+    utils::currency_mapping::is_cross_border_by_currency,
 };
 
 /// Process a cross-border transaction with currency conversion if needed
-pub async fn process_cross_border_transaction(
-    pool: &SqlitePool,
+pub fn process_cross_border_transaction(
+    db_conn: &Arc<Mutex<rusqlite::Connection>>,
     exchange_rate_service: &ExchangeRateService,
     compliance_service: &ComplianceService,
     from_account_id: &str,
@@ -30,8 +31,7 @@ pub async fn process_cross_border_transaction(
 
     // Validate accounts and transaction parameters
     let (from_account, to_account) =
-        crate::db::validate_transaction(pool, from_account_id, to_account_id, amount, currency)
-            .await?;
+        crate::db::validate_transaction(db_conn, from_account_id, to_account_id, amount, currency)?;
 
     // For cross-border transactions, we don't immediately check recipient currency
     // as it might need conversion
@@ -48,12 +48,20 @@ pub async fn process_cross_border_transaction(
     }
 
     // Determine if this is a cross-border transaction
+    // First try to use country information if available
     let is_cross_border = match (
         from_account.country.as_deref(),
         to_account.country.as_deref(),
     ) {
         (Some(from_country), Some(to_country)) => from_country != to_country,
-        _ => false, // Default to false if country information is missing
+        // If country information is missing, use currency-based detection
+        _ => {
+            debug!(
+                "Country information missing, using currency-based cross-border detection: {} -> {}",
+                from_account.currency, to_account.currency
+            );
+            is_cross_border_by_currency(&from_account.currency, &to_account.currency)
+        }
     };
 
     // Variables to track original and converted amounts
@@ -71,10 +79,11 @@ pub async fn process_cross_border_transaction(
         );
 
         // Convert the amount to recipient's currency
-        let (converted, rate) = match exchange_rate_service
-            .convert_currency(amount, &from_account.currency, &to_account.currency)
-            .await
-        {
+        let (converted, rate) = match exchange_rate_service.convert_currency(
+            amount,
+            &from_account.currency,
+            &to_account.currency,
+        ) {
             Ok(result) => result,
             Err(e) => {
                 error!("Currency conversion failed: {}", e);
@@ -100,22 +109,81 @@ pub async fn process_cross_border_transaction(
         )));
     }
 
-    // For cross-border transactions, perform compliance checks before starting transaction
-    let compliance_status = if is_cross_border {
-        // Create a transaction ID early for compliance checks
-        let transaction_id = Uuid::new_v4().to_string();
+    let mut conn = db_conn.lock().map_err(|e| {
+        error!("Failed to acquire database lock: {}", e);
+        DbError::from("Failed to acquire database lock")
+    })?;
 
-        // Run compliance checks
+    // Begin a transaction
+    let tx = conn.transaction().map_err(|e| {
+        error!("Failed to begin database transaction: {}", e);
+        DbError::from(e.to_string())
+    })?;
+
+    // Create a transaction record first
+    let id = Uuid::new_v4().to_string();
+    let now = chrono::Utc::now().naive_utc();
+    let initial_status = TransactionStatus::Pending.to_string();
+
+    tx.execute(
+        "INSERT INTO transactions (
+            id, from_account_id, to_account_id,
+            amount, currency, status, description,
+            exchange_rate, original_amount, original_currency, is_cross_border,
+            created_at, updated_at
+        )
+        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+        rusqlite::params![
+            id,
+            from_account_id,
+            to_account_id,
+            final_amount,
+            target_currency,
+            initial_status,
+            description,
+            exchange_rate,
+            original_amount,
+            original_currency,
+            Some(is_cross_border),
+            now,
+            now
+        ],
+    )
+    .map_err(|e| {
+        error!("Database error creating transaction record: {}", e);
+        DbError::from(e.to_string())
+    })?;
+
+    // Commit the transaction record first so it exists for foreign key constraints
+    tx.commit().map_err(|e| {
+        error!("Failed to commit initial transaction: {}", e);
+        DbError::from(e.to_string())
+    })?;
+
+    // For cross-border transactions, perform compliance checks after transaction record exists
+    if is_cross_border {
+        // Run compliance checks with the existing connection to avoid deadlock
         let from_country = from_account.country.as_deref().unwrap_or("UNKNOWN");
         let to_country = to_account.country.as_deref().unwrap_or("UNKNOWN");
 
-        let compliance_result = match compliance_service
-            .check_compliance(&transaction_id, from_country, to_country, amount, currency)
-            .await
-        {
+        let compliance_result = match compliance_service.check_compliance_with_conn(
+            &conn,
+            &id,
+            from_country,
+            to_country,
+            final_amount,
+            &target_currency,
+        ) {
             Ok(result) => result,
             Err(e) => {
                 error!("Compliance check failed: {}", e);
+                // Update transaction status to failed and return
+                let failed_status = TransactionStatus::Failed.to_string();
+                let now = chrono::Utc::now().naive_utc();
+                let _ = conn.execute(
+                    "UPDATE transactions SET status = ?1, updated_at = ?2 WHERE id = ?3",
+                    rusqlite::params![failed_status, now, id],
+                );
                 return Err(e);
             }
         };
@@ -128,10 +196,62 @@ pub async fn process_cross_border_transaction(
             }
             ComplianceStatus::PendingReview => {
                 debug!("Compliance check pending review");
-                compliance_result.status
+                // Transaction remains pending - fetch and return it
+                let transaction = conn
+                    .query_row(
+                        "SELECT id, from_account_id, to_account_id, amount, currency, 
+                            status, description, exchange_rate, original_amount, 
+                            original_currency, is_cross_border, created_at, updated_at
+                     FROM transactions 
+                     WHERE id = ?1",
+                        rusqlite::params![id],
+                        |row| {
+                            let status_str: String = row.get(5)?;
+                            let status = match status_str.as_str() {
+                                "PENDING" => TransactionStatus::Pending,
+                                "COMPLETED" => TransactionStatus::Completed,
+                                "FAILED" => TransactionStatus::Failed,
+                                _ => TransactionStatus::Failed,
+                            };
+
+                            Ok(Transaction {
+                                id: row.get(0)?,
+                                from_account_id: row.get(1)?,
+                                to_account_id: row.get(2)?,
+                                amount: row.get(3)?,
+                                currency: row.get(4)?,
+                                status,
+                                description: row.get(6)?,
+                                exchange_rate: row.get(7)?,
+                                original_amount: row.get(8)?,
+                                original_currency: row.get(9)?,
+                                is_cross_border: Some(row.get::<_, i64>(10)? != 0),
+                                created_at: row.get(11)?,
+                                updated_at: row.get(12)?,
+                            })
+                        },
+                    )
+                    .map_err(|e| {
+                        error!("Database error fetching transaction {}: {}", id, e);
+                        DbError::from(e.to_string())
+                    })?;
+
+                info!(
+                    "Cross-border transaction pending compliance review: id={}",
+                    transaction.id
+                );
+
+                return Ok(transaction);
             }
             ComplianceStatus::Rejected => {
                 error!("Compliance check rejected transaction");
+                // Update transaction status to failed
+                let failed_status = TransactionStatus::Failed.to_string();
+                let now = chrono::Utc::now().naive_utc();
+                let _ = conn.execute(
+                    "UPDATE transactions SET status = ?1, updated_at = ?2 WHERE id = ?3",
+                    rusqlite::params![failed_status, now, id],
+                );
                 return Err(DbError::from(format!(
                     "Transaction rejected due to compliance issues: {}",
                     compliance_result
@@ -145,124 +265,32 @@ pub async fn process_cross_border_transaction(
         ComplianceStatus::Approved
     };
 
-    // Now that all external operations are complete, start the database transaction
-    let mut tx = pool.begin().await.map_err(|e| {
-        error!("Failed to begin database transaction: {}", e);
-        DbError::from(e)
+    // Now proceed with balance updates since compliance is approved
+    let tx = conn.transaction().map_err(|e| {
+        error!("Failed to begin balance update transaction: {}", e);
+        DbError::from(e.to_string())
     })?;
-
-    // Create a transaction record
-    let id = Uuid::new_v4().to_string();
-    let now = chrono::Utc::now().naive_utc();
-
-    // Determine initial status based on compliance
-    let initial_status = match compliance_status {
-        ComplianceStatus::Approved => TransactionStatus::Pending,
-        ComplianceStatus::PendingReview => TransactionStatus::Pending,
-        ComplianceStatus::Rejected => TransactionStatus::Failed, // This shouldn't happen as we return early above
-    };
-
-    let status_str = initial_status.to_string();
-
-    sqlx::query!(
-        r#"
-        INSERT INTO transactions (
-            id, from_account_id, to_account_id,
-            amount, currency, status, description,
-            exchange_rate, original_amount, original_currency, is_cross_border,
-            created_at, updated_at
-        )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        "#,
-        id,
-        from_account_id,
-        to_account_id,
-        final_amount,
-        target_currency,
-        status_str,
-        description,
-        exchange_rate,
-        original_amount,
-        original_currency,
-        is_cross_border,
-        now,
-        now
-    )
-    .execute(&mut *tx)
-    .await
-    .map_err(|e| {
-        error!("Database error creating transaction record: {}", e);
-        DbError::from(e)
-    })?;
-
-    // If compliance status is pending review, don't proceed with the transfer yet
-    if matches!(compliance_status, ComplianceStatus::PendingReview) {
-        tx.commit().await.map_err(|e| {
-            error!("Failed to commit transaction: {}", e);
-            DbError::from(e)
-        })?;
-
-        // Fetch the pending transaction to return
-        let transaction = sqlx::query_as!(
-            Transaction,
-            r#"
-            SELECT 
-                id as "id!", 
-                from_account_id as "from_account_id!", 
-                to_account_id as "to_account_id!",
-                amount as "amount!", 
-                currency as "currency!",
-                status as "status: TransactionStatus",
-                description,
-                exchange_rate, original_amount, original_currency, is_cross_border,
-                created_at as "created_at!", 
-                updated_at as "updated_at!"
-            FROM transactions 
-            WHERE id = ?
-            "#,
-            id
-        )
-        .fetch_one(pool)
-        .await
-        .map_err(|e| {
-            error!("Database error fetching transaction {}: {}", id, e);
-            DbError::from(e)
-        })?;
-
-        info!(
-            "Cross-border transaction pending compliance review: id={}",
-            transaction.id
-        );
-
-        return Ok(transaction);
-    }
 
     // Update sender balance - deduct the amount with optimistic concurrency check
     let now = chrono::Utc::now().naive_utc();
     let new_from_balance = from_account.balance - amount; // Always deduct the original amount
 
     // Ensure the balance hasn't changed since we read it
-    let result = sqlx::query!(
-        r#"
-        UPDATE accounts
-        SET balance = ?, updated_at = ?
-        WHERE id = ? AND balance = ?
-        "#,
-        new_from_balance,
-        now,
-        from_account_id,
-        from_account.balance
-    )
-    .execute(&mut *tx)
-    .await
-    .map_err(|e| {
-        error!("Database error updating sender balance: {}", e);
-        DbError::from(e)
-    })?;
+    let result = tx
+        .execute(
+            "UPDATE accounts
+        SET balance = ?1, updated_at = ?2
+        WHERE id = ?3 AND balance = ?4",
+            rusqlite::params![new_from_balance, now, from_account_id, from_account.balance],
+        )
+        .map_err(|e| {
+            error!("Database error updating sender balance: {}", e);
+            DbError::from(e.to_string())
+        })?;
 
     // Check if the update affected a row (if not, the balance has changed since we read it)
-    if result.rows_affected() == 0 {
-        tx.rollback().await.map_err(DbError::from)?;
+    if result == 0 {
+        tx.rollback().map_err(|e| DbError::from(e.to_string()))?;
         error!(
             "Concurrent update detected on sender account: {}",
             from_account_id
@@ -282,27 +310,21 @@ pub async fn process_cross_border_transaction(
     let new_to_balance = to_account.balance + final_amount; // Add the possibly converted amount
 
     // Ensure the balance hasn't changed since we read it
-    let result = sqlx::query!(
-        r#"
-        UPDATE accounts
-        SET balance = ?, updated_at = ?
-        WHERE id = ? AND balance = ?
-        "#,
-        new_to_balance,
-        now,
-        to_account_id,
-        to_account.balance
-    )
-    .execute(&mut *tx)
-    .await
-    .map_err(|e| {
-        error!("Database error updating recipient balance: {}", e);
-        DbError::from(e)
-    })?;
+    let result = tx
+        .execute(
+            "UPDATE accounts
+        SET balance = ?1, updated_at = ?2
+        WHERE id = ?3 AND balance = ?4",
+            rusqlite::params![new_to_balance, now, to_account_id, to_account.balance],
+        )
+        .map_err(|e| {
+            error!("Database error updating recipient balance: {}", e);
+            DbError::from(e.to_string())
+        })?;
 
     // Check if the update affected a row
-    if result.rows_affected() == 0 {
-        tx.rollback().await.map_err(DbError::from)?;
+    if result == 0 {
+        tx.rollback().map_err(|e| DbError::from(e.to_string()))?;
         error!(
             "Concurrent update detected on recipient account: {}",
             to_account_id
@@ -321,55 +343,62 @@ pub async fn process_cross_border_transaction(
     let now = chrono::Utc::now().naive_utc();
     let completed_status = TransactionStatus::Completed.to_string();
 
-    sqlx::query!(
-        r#"
-        UPDATE transactions
-        SET status = ?, updated_at = ?
-        WHERE id = ?
-        "#,
-        completed_status,
-        now,
-        id
+    tx.execute(
+        "UPDATE transactions
+        SET status = ?1, updated_at = ?2
+        WHERE id = ?3",
+        rusqlite::params![completed_status, now, id],
     )
-    .execute(&mut *tx)
-    .await
     .map_err(|e| {
         error!("Database error updating transaction status: {}", e);
-        DbError::from(e)
+        DbError::from(e.to_string())
     })?;
 
     // Commit the transaction
-    tx.commit().await.map_err(|e| {
+    tx.commit().map_err(|e| {
         error!("Failed to commit transaction: {}", e);
-        DbError::from(e)
+        DbError::from(e.to_string())
     })?;
 
     // Fetch the completed transaction to return
-    let transaction = sqlx::query_as!(
-        Transaction,
-        r#"
-        SELECT 
-            id as "id!", 
-            from_account_id as "from_account_id!", 
-            to_account_id as "to_account_id!",
-            amount as "amount!", 
-            currency as "currency!",
-            status as "status: TransactionStatus",
-            description,
-            exchange_rate, original_amount, original_currency, is_cross_border,
-            created_at as "created_at!", 
-            updated_at as "updated_at!"
-        FROM transactions 
-        WHERE id = ?
-        "#,
-        id
-    )
-    .fetch_one(pool)
-    .await
-    .map_err(|e| {
-        error!("Database error fetching transaction {}: {}", id, e);
-        DbError::from(e)
-    })?;
+    let transaction = conn
+        .query_row(
+            "SELECT id, from_account_id, to_account_id, amount, currency, 
+                status, description, exchange_rate, original_amount, 
+                original_currency, is_cross_border, created_at, updated_at
+         FROM transactions 
+         WHERE id = ?1",
+            rusqlite::params![id],
+            |row| {
+                let status_str: String = row.get(5)?;
+                let status = match status_str.as_str() {
+                    "PENDING" => TransactionStatus::Pending,
+                    "COMPLETED" => TransactionStatus::Completed,
+                    "FAILED" => TransactionStatus::Failed,
+                    _ => TransactionStatus::Failed,
+                };
+
+                Ok(Transaction {
+                    id: row.get(0)?,
+                    from_account_id: row.get(1)?,
+                    to_account_id: row.get(2)?,
+                    amount: row.get(3)?,
+                    currency: row.get(4)?,
+                    status,
+                    description: row.get(6)?,
+                    exchange_rate: row.get(7)?,
+                    original_amount: row.get(8)?,
+                    original_currency: row.get(9)?,
+                    is_cross_border: Some(row.get::<_, i64>(10)? != 0),
+                    created_at: row.get(11)?,
+                    updated_at: row.get(12)?,
+                })
+            },
+        )
+        .map_err(|e| {
+            error!("Database error fetching transaction {}: {}", id, e);
+            DbError::from(e.to_string())
+        })?;
 
     info!(
         "Cross-border transaction completed successfully: id={}, from={}, to={}, amount={}, currency={}, converted={}",

@@ -1,22 +1,22 @@
 use axum::{extract::State, Extension, Json};
 use payment_system::{
-    db::DbPool,
+    db::connection::DbConnection,
     handlers::transaction::{create, list},
     middleware::{auth::JwtAuth, AuthUser},
     models::{CreateTransactionRequest, TransactionStatus},
     services::{compliance::ComplianceService, exchange_rate::ExchangeRateService},
 };
-use sqlx;
-use std::env;
+use std::{env, sync::Arc};
+use tempfile::TempDir;
 
 // Mock services
-fn create_test_exchange_rate_service(pool: DbPool) -> ExchangeRateService {
+fn create_test_exchange_rate_service(db_conn: Arc<DbConnection>) -> ExchangeRateService {
     env::set_var("EXCHANGE_RATE_API_KEY", "test_key");
-    ExchangeRateService::new(pool.clone())
+    ExchangeRateService::new(db_conn.clone())
 }
 
-fn create_test_compliance_service(pool: DbPool) -> ComplianceService {
-    ComplianceService::new(pool.clone())
+fn create_test_compliance_service(db_conn: Arc<DbConnection>) -> ComplianceService {
+    ComplianceService::new(db_conn.clone())
 }
 
 // Mock AuthUser for testing
@@ -26,67 +26,70 @@ fn create_test_auth_user() -> AuthUser {
     }
 }
 
-// Mock DbPool for testing
-async fn setup_test_db() -> DbPool {
-    let db_url = "sqlite::memory:";
-    let pool = sqlx::SqlitePool::connect(db_url)
-        .await
-        .expect("Failed to create test database");
+// Mock DbConnection for testing
+fn setup_test_db() -> Arc<DbConnection> {
+    // Create a temporary directory that persists for the test
+    let temp_dir = TempDir::new().expect("Failed to create temp dir");
+    let db_path = temp_dir.path().join("test.db");
+    let db_path_str = db_path.to_str().unwrap();
 
-    // Run migrations
-    sqlx::migrate!("./migrations")
-        .run(&pool)
-        .await
-        .expect("Failed to run migrations");
+    let db_conn = DbConnection::new(db_path_str).expect("Failed to create test database");
+
+    let db_conn = Arc::new(db_conn);
 
     // Create test users and accounts
-    let sender_id = "00000000-0000-0000-0000-000000000000".to_string();
-    let recipient_id = "00000000-0000-0000-0000-000000000001".to_string();
+    let sender_id = "00000000-0000-0000-0000-000000000000";
+    let recipient_id = "00000000-0000-0000-0000-000000000001";
 
-    // Create sender
-    sqlx::query!(
-        r#"
-        INSERT INTO users (id, username, email, password_hash, created_at, updated_at)
-        VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP),
-               (?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
-        "#,
-        sender_id,
-        "sender",
-        "sender@example.com",
-        "password_hash",
-        recipient_id,
-        "recipient",
-        "recipient@example.com",
-        "password_hash"
-    )
-    .execute(&pool)
-    .await
-    .expect("Failed to create test users");
+    // Create test data using the database functions
+    {
+        let conn = db_conn.conn.lock().unwrap();
 
-    // Create accounts for both users with INR currency
-    sqlx::query!(
-        r#"
-        INSERT INTO accounts (id, currency, balance, created_at, updated_at)
-        VALUES (?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP),
-               (?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
-        "#,
-        sender_id,
-        "INR",
-        5000.0,
-        recipient_id,
-        "INR",
-        1000.0,
-    )
-    .execute(&pool)
-    .await
-    .expect("Failed to create test accounts");
+        // Insert test users
+        conn.execute(
+            "INSERT INTO users (id, username, email, password_hash, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
+            [sender_id, "sender", "sender@example.com", "password_hash"],
+        )
+        .expect("Failed to create sender user");
 
-    pool
+        conn.execute(
+            "INSERT INTO users (id, username, email, password_hash, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
+            [
+                recipient_id,
+                "recipient",
+                "recipient@example.com",
+                "password_hash",
+            ],
+        )
+        .expect("Failed to create recipient user");
+
+        // Insert test accounts
+        conn.execute(
+            "INSERT INTO accounts (id, currency, balance, created_at, updated_at)
+             VALUES (?1, ?2, ?3, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
+            [sender_id, "INR", "5000.0"],
+        )
+        .expect("Failed to create sender account");
+
+        conn.execute(
+            "INSERT INTO accounts (id, currency, balance, created_at, updated_at)
+             VALUES (?1, ?2, ?3, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
+            [recipient_id, "INR", "1000.0"],
+        )
+        .expect("Failed to create recipient account");
+    }
+
+    // Keep the temp directory alive by storing it in the connection
+    std::mem::forget(temp_dir);
+
+    db_conn
 }
 
 #[tokio::test]
 async fn test_create_transaction_success() {
-    let pool = setup_test_db().await;
+    let db_conn = setup_test_db();
     let jwt_auth = JwtAuth::new(b"test_secret");
     let auth_user = create_test_auth_user();
     let recipient_id = "00000000-0000-0000-0000-000000000001";
@@ -99,11 +102,11 @@ async fn test_create_transaction_success() {
         convert_currency: Some(false),
     };
 
-    let exchange_rate_service = create_test_exchange_rate_service(pool.clone());
-    let compliance_service = create_test_compliance_service(pool.clone());
+    let exchange_rate_service = create_test_exchange_rate_service(db_conn.clone());
+    let compliance_service = create_test_compliance_service(db_conn.clone());
 
     let result = create(
-        State((pool.clone(), jwt_auth)),
+        State((db_conn.clone(), jwt_auth)),
         auth_user,
         Extension(exchange_rate_service),
         Extension(compliance_service),
@@ -134,7 +137,7 @@ async fn test_create_transaction_success() {
 
 #[tokio::test]
 async fn test_create_transaction_insufficient_balance() {
-    let pool = setup_test_db().await;
+    let db_conn = setup_test_db();
     let jwt_auth = JwtAuth::new(b"test_secret");
     let auth_user = create_test_auth_user();
     let recipient_id = "00000000-0000-0000-0000-000000000001";
@@ -147,11 +150,11 @@ async fn test_create_transaction_insufficient_balance() {
         convert_currency: Some(false),
     };
 
-    let exchange_rate_service = create_test_exchange_rate_service(pool.clone());
-    let compliance_service = create_test_compliance_service(pool.clone());
+    let exchange_rate_service = create_test_exchange_rate_service(db_conn.clone());
+    let compliance_service = create_test_compliance_service(db_conn.clone());
 
     let result = create(
-        State((pool.clone(), jwt_auth)),
+        State((db_conn.clone(), jwt_auth)),
         auth_user,
         Extension(exchange_rate_service),
         Extension(compliance_service),
@@ -168,7 +171,7 @@ async fn test_create_transaction_insufficient_balance() {
 
 #[tokio::test]
 async fn test_create_transaction_invalid_recipient() {
-    let pool = setup_test_db().await;
+    let db_conn = setup_test_db();
     let jwt_auth = JwtAuth::new(b"test_secret");
     let auth_user = create_test_auth_user();
 
@@ -180,11 +183,11 @@ async fn test_create_transaction_invalid_recipient() {
         convert_currency: Some(false),
     };
 
-    let exchange_rate_service = create_test_exchange_rate_service(pool.clone());
-    let compliance_service = create_test_compliance_service(pool.clone());
+    let exchange_rate_service = create_test_exchange_rate_service(db_conn.clone());
+    let compliance_service = create_test_compliance_service(db_conn.clone());
 
     let result = create(
-        State((pool.clone(), jwt_auth)),
+        State((db_conn.clone(), jwt_auth)),
         auth_user,
         Extension(exchange_rate_service),
         Extension(compliance_service),
@@ -200,7 +203,7 @@ async fn test_create_transaction_invalid_recipient() {
 
 #[tokio::test]
 async fn test_list_transactions() {
-    let pool = setup_test_db().await;
+    let db_conn = setup_test_db();
     let jwt_auth = JwtAuth::new(b"test_secret");
     let auth_user = create_test_auth_user();
 
@@ -213,11 +216,11 @@ async fn test_list_transactions() {
         convert_currency: Some(false),
     };
 
-    let exchange_rate_service = create_test_exchange_rate_service(pool.clone());
-    let compliance_service = create_test_compliance_service(pool.clone());
+    let exchange_rate_service = create_test_exchange_rate_service(db_conn.clone());
+    let compliance_service = create_test_compliance_service(db_conn.clone());
 
     let create_result = create(
-        State((pool.clone(), jwt_auth.clone())),
+        State((db_conn.clone(), jwt_auth.clone())),
         auth_user.clone(),
         Extension(exchange_rate_service),
         Extension(compliance_service),
@@ -227,7 +230,7 @@ async fn test_list_transactions() {
     assert!(create_result.is_ok(), "Transaction creation should succeed");
 
     // Now test listing transactions
-    let list_result = list(State((pool.clone(), jwt_auth)), auth_user).await;
+    let list_result = list(State((db_conn.clone(), jwt_auth)), auth_user).await;
 
     assert!(list_result.is_ok(), "Transaction listing should succeed");
     let transactions = list_result.unwrap().0;

@@ -2,7 +2,7 @@ use chrono::NaiveDateTime;
 use serde::{Deserialize, Serialize};
 use validator::Validate;
 
-#[derive(Debug, Serialize, Deserialize, sqlx::FromRow)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct Transaction {
     pub id: String,
     pub from_account_id: String,
@@ -49,32 +49,6 @@ impl std::fmt::Display for TransactionStatus {
     }
 }
 
-// SQLx implementations
-impl sqlx::Type<sqlx::Sqlite> for TransactionStatus {
-    fn type_info() -> sqlx::sqlite::SqliteTypeInfo {
-        <String as sqlx::Type<sqlx::Sqlite>>::type_info()
-    }
-}
-
-impl<'r> sqlx::Decode<'r, sqlx::Sqlite> for TransactionStatus {
-    fn decode(value: sqlx::sqlite::SqliteValueRef<'r>) -> Result<Self, sqlx::error::BoxDynError> {
-        let str_value = <String as sqlx::Decode<sqlx::Sqlite>>::decode(value)?;
-        str_value.parse::<Self>().map_err(|e: String| e.into())
-    }
-}
-
-impl<'q> sqlx::Encode<'q, sqlx::Sqlite> for TransactionStatus {
-    fn encode_by_ref(
-        &self,
-        args: &mut Vec<sqlx::sqlite::SqliteArgumentValue<'q>>,
-    ) -> sqlx::encode::IsNull {
-        args.push(sqlx::sqlite::SqliteArgumentValue::Text(
-            self.to_string().into(),
-        ));
-        sqlx::encode::IsNull::No
-    }
-}
-
 #[derive(Debug, Deserialize, Validate)]
 pub struct CreateTransactionRequest {
     #[validate(length(equal = 36))] // UUID length
@@ -89,7 +63,7 @@ pub struct CreateTransactionRequest {
     pub convert_currency: Option<bool>,
 }
 
-#[derive(Debug, Serialize, sqlx::FromRow)]
+#[derive(Debug, Serialize)]
 pub struct Account {
     pub id: String, // This is now the same as user_id
     pub balance: f64,

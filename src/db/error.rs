@@ -3,9 +3,9 @@ use thiserror::Error;
 /// Custom error type for database operations
 #[derive(Error, Debug)]
 pub enum DbError {
-    /// Error from the SQLx library
+    /// Error from the rusqlite library
     #[error("Database error: {0}")]
-    SqlxError(#[from] sqlx::Error),
+    RusqliteError(String),
 
     /// Custom error with message
     #[error("{0}")]
@@ -24,5 +24,11 @@ impl From<&str> for DbError {
 impl From<String> for DbError {
     fn from(message: String) -> Self {
         DbError::Custom(message)
+    }
+}
+
+impl From<rusqlite::Error> for DbError {
+    fn from(error: rusqlite::Error) -> Self {
+        DbError::RusqliteError(error.to_string())
     }
 }

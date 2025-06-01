@@ -1,30 +1,31 @@
 use axum::{extract::State, extract::TypedHeader, headers::Authorization, Json};
 use payment_system::{
-    db::DbPool,
+    db::connection::DbConnection,
     handlers::auth::{login, logout, refresh_token, register},
     middleware::auth::JwtAuth,
     models::{CreateUserRequest, LoginRequest, RefreshTokenRequest},
 };
-use sqlx;
+use std::sync::Arc;
+use tempfile::TempDir;
 
-// Mock DbPool for testing
-async fn setup_test_db() -> DbPool {
-    let db_url = "sqlite::memory:";
-    let pool = sqlx::SqlitePool::connect(db_url)
-        .await
-        .expect("Failed to create test database");
+// Mock DbConnection for testing
+fn setup_test_db() -> Arc<DbConnection> {
+    // Create a temporary directory that persists for the test
+    let temp_dir = TempDir::new().expect("Failed to create temp dir");
+    let db_path = temp_dir.path().join("test.db");
+    let db_path_str = db_path.to_str().unwrap();
 
-    sqlx::migrate!("./migrations")
-        .run(&pool)
-        .await
-        .expect("Failed to run migrations");
+    let db_conn = DbConnection::new(db_path_str).expect("Failed to create test database");
 
-    pool
+    // Keep the temp directory alive by storing it in the connection
+    std::mem::forget(temp_dir);
+
+    Arc::new(db_conn)
 }
 
 #[tokio::test]
 async fn test_register_success() {
-    let pool = setup_test_db().await;
+    let db_conn = setup_test_db();
     let jwt_auth = JwtAuth::new(b"test_secret");
 
     let request = CreateUserRequest {
@@ -33,7 +34,7 @@ async fn test_register_success() {
         password: "password123".to_string(),
     };
 
-    let result = register(State((pool, jwt_auth)), Json(request)).await;
+    let result = register(State((db_conn, jwt_auth)), Json(request)).await;
 
     assert!(result.is_ok(), "User registration should succeed");
 
@@ -44,7 +45,7 @@ async fn test_register_success() {
 
 #[tokio::test]
 async fn test_register_invalid_email() {
-    let pool = setup_test_db().await;
+    let db_conn = setup_test_db();
     let jwt_auth = JwtAuth::new(b"test_secret");
 
     let request = CreateUserRequest {
@@ -53,7 +54,7 @@ async fn test_register_invalid_email() {
         password: "password123".to_string(),
     };
 
-    let result = register(State((pool, jwt_auth)), Json(request)).await;
+    let result = register(State((db_conn, jwt_auth)), Json(request)).await;
 
     assert!(
         result.is_err(),
@@ -64,7 +65,7 @@ async fn test_register_invalid_email() {
 
 #[tokio::test]
 async fn test_register_short_password() {
-    let pool = setup_test_db().await;
+    let db_conn = setup_test_db();
     let jwt_auth = JwtAuth::new(b"test_secret");
 
     let request = CreateUserRequest {
@@ -73,7 +74,7 @@ async fn test_register_short_password() {
         password: "short".to_string(), // Less than 8 characters
     };
 
-    let result = register(State((pool, jwt_auth)), Json(request)).await;
+    let result = register(State((db_conn, jwt_auth)), Json(request)).await;
 
     assert!(
         result.is_err(),
@@ -84,7 +85,7 @@ async fn test_register_short_password() {
 
 #[tokio::test]
 async fn test_login_success() {
-    let pool = setup_test_db().await;
+    let db_conn = setup_test_db();
     let jwt_auth = JwtAuth::new(b"test_secret");
 
     // First register a user
@@ -95,7 +96,7 @@ async fn test_login_success() {
     };
 
     let _ = register(
-        State((pool.clone(), jwt_auth.clone())),
+        State((db_conn.clone(), jwt_auth.clone())),
         Json(register_request),
     )
     .await;
@@ -106,7 +107,7 @@ async fn test_login_success() {
         password: "password123".to_string(),
     };
 
-    let result = login(State((pool, jwt_auth)), Json(login_request)).await;
+    let result = login(State((db_conn, jwt_auth)), Json(login_request)).await;
 
     assert!(result.is_ok(), "Login should succeed");
 
@@ -119,7 +120,7 @@ async fn test_login_success() {
 
 #[tokio::test]
 async fn test_login_wrong_password() {
-    let pool = setup_test_db().await;
+    let db_conn = setup_test_db();
     let jwt_auth = JwtAuth::new(b"test_secret");
 
     // First register a user
@@ -130,7 +131,7 @@ async fn test_login_wrong_password() {
     };
 
     let _ = register(
-        State((pool.clone(), jwt_auth.clone())),
+        State((db_conn.clone(), jwt_auth.clone())),
         Json(register_request),
     )
     .await;
@@ -141,7 +142,7 @@ async fn test_login_wrong_password() {
         password: "wrongpassword".to_string(),
     };
 
-    let result = login(State((pool, jwt_auth)), Json(login_request)).await;
+    let result = login(State((db_conn, jwt_auth)), Json(login_request)).await;
 
     assert!(result.is_err(), "Login with wrong password should fail");
     assert!(result.unwrap_err().1.contains("Invalid password"));
@@ -149,7 +150,7 @@ async fn test_login_wrong_password() {
 
 #[tokio::test]
 async fn test_refresh_token() {
-    let pool = setup_test_db().await;
+    let db_conn = setup_test_db();
     let jwt_auth = JwtAuth::new(b"test_secret");
 
     // First register and login a user
@@ -160,7 +161,7 @@ async fn test_refresh_token() {
     };
 
     let _ = register(
-        State((pool.clone(), jwt_auth.clone())),
+        State((db_conn.clone(), jwt_auth.clone())),
         Json(register_request),
     )
     .await;
@@ -170,17 +171,20 @@ async fn test_refresh_token() {
         password: "password123".to_string(),
     };
 
-    let login_result = login(State((pool.clone(), jwt_auth.clone())), Json(login_request))
-        .await
-        .unwrap()
-        .0;
+    let login_result = login(
+        State((db_conn.clone(), jwt_auth.clone())),
+        Json(login_request),
+    )
+    .await
+    .unwrap()
+    .0;
 
     // Try to refresh the token
     let refresh_request = RefreshTokenRequest {
         refresh_token: login_result.refresh_token,
     };
 
-    let result = refresh_token(State((pool, jwt_auth)), Json(refresh_request)).await;
+    let result = refresh_token(State((db_conn, jwt_auth)), Json(refresh_request)).await;
 
     assert!(result.is_ok(), "Token refresh should succeed");
     let response = result.unwrap().0;
@@ -190,7 +194,7 @@ async fn test_refresh_token() {
 
 #[tokio::test]
 async fn test_logout() {
-    let pool = setup_test_db().await;
+    let db_conn = setup_test_db();
     let jwt_auth = JwtAuth::new(b"test_secret");
 
     // First register and login a user
@@ -201,7 +205,7 @@ async fn test_logout() {
     };
 
     let _ = register(
-        State((pool.clone(), jwt_auth.clone())),
+        State((db_conn.clone(), jwt_auth.clone())),
         Json(register_request),
     )
     .await;
@@ -211,16 +215,19 @@ async fn test_logout() {
         password: "password123".to_string(),
     };
 
-    let login_result = login(State((pool.clone(), jwt_auth.clone())), Json(login_request))
-        .await
-        .unwrap()
-        .0;
+    let login_result = login(
+        State((db_conn.clone(), jwt_auth.clone())),
+        Json(login_request),
+    )
+    .await
+    .unwrap()
+    .0;
 
     // Try to logout
     let auth_header =
         Authorization::bearer(&login_result.access_token).expect("Failed to create bearer token");
 
-    let result = logout(State((pool, jwt_auth)), TypedHeader(auth_header)).await;
+    let result = logout(State((db_conn, jwt_auth)), TypedHeader(auth_header)).await;
 
     assert!(result.is_ok(), "Logout should succeed");
 

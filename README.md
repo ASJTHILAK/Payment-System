@@ -11,7 +11,7 @@ A modern, secure RESTful API for digital payments built with Rust and Axum. Supp
 - **Cross-Border Compliance**: Automated risk assessment and compliance checks for international transfers
 - **Validation**: Comprehensive input validation for all endpoints with detailed error messages
 - **Error Handling**: Detailed error responses with proper HTTP status codes for client applications
-- **Database**: SQLite persistence with SQLx for type-safe queries and automatic migrations
+- **Database**: SQLite persistence with rusqlite for lightweight, embedded database operations with automatic database creation
 - **Rate Limiting**: IP-based rate limiting to prevent abuse and ensure service stability
 - **Audit Trail**: Detailed transaction history with original and converted amounts for cross-border payments
 

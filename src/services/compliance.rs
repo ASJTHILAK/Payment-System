@@ -1,9 +1,10 @@
 // src/services/compliance.rs
-use sqlx::SqlitePool;
+use rusqlite::OptionalExtension;
+use std::sync::Arc;
 use tracing::{debug, error, info};
 use uuid::Uuid;
 
-use crate::db::{DbError, DbResult};
+use crate::db::{connection::DbConnection, DbError, DbResult};
 
 /// Represents the status of a compliance check
 #[derive(Debug, Clone, PartialEq)]
@@ -56,17 +57,18 @@ pub struct ComplianceCheck {
 /// Service for handling compliance checks
 #[derive(Clone)]
 pub struct ComplianceService {
-    pool: SqlitePool,
+    db_conn: Arc<DbConnection>,
 }
 
 impl ComplianceService {
-    pub fn new(pool: SqlitePool) -> Self {
-        Self { pool }
+    pub fn new(db_conn: Arc<DbConnection>) -> Self {
+        Self { db_conn }
     }
 
-    /// Run compliance checks for a cross-border transaction
-    pub async fn check_compliance(
+    /// Run compliance checks using an existing database connection
+    pub fn check_compliance_with_conn(
         &self,
+        conn: &rusqlite::Connection,
         transaction_id: &str,
         source_country: &str,
         destination_country: &str,
@@ -74,7 +76,7 @@ impl ComplianceService {
         currency: &str,
     ) -> DbResult<ComplianceCheck> {
         debug!(
-            "Running compliance check: transaction={}, from={}, to={}, amount={}, currency={}",
+            "Running compliance check with existing connection: transaction={}, from={}, to={}, amount={}, currency={}",
             transaction_id, source_country, destination_country, amount, currency
         );
 
@@ -96,37 +98,34 @@ impl ComplianceService {
             (ComplianceStatus::Approved, None)
         };
 
-        // Save compliance check to database
+        // Save compliance check to database using existing connection
         let id = Uuid::new_v4().to_string();
         let now = chrono::Utc::now().naive_utc();
         let status_str = status.to_string();
 
-        sqlx::query!(
-            r#"
-            INSERT INTO compliance_checks (
+        conn.execute(
+            "INSERT INTO compliance_checks (
                 id, transaction_id, source_country, destination_country,
                 amount, currency, risk_score, status, details,
                 created_at, updated_at
-            )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            "#,
-            id,
-            transaction_id,
-            source_country,
-            destination_country,
-            amount,
-            currency,
-            risk_score,
-            status_str,
-            details,
-            now,
-            now
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+            rusqlite::params![
+                id,
+                transaction_id,
+                source_country,
+                destination_country,
+                amount,
+                currency,
+                risk_score,
+                status_str,
+                details,
+                now,
+                now
+            ],
         )
-        .execute(&self.pool)
-        .await
         .map_err(|e| {
             error!("Database error saving compliance check: {}", e);
-            DbError::from(e)
+            DbError::from(e.to_string())
         })?;
 
         info!(
@@ -185,7 +184,7 @@ impl ComplianceService {
     }
 
     /// Get compliance check by transaction ID
-    pub async fn get_compliance_check_by_transaction(
+    pub fn get_compliance_check_by_transaction(
         &self,
         transaction_id: &str,
     ) -> DbResult<Option<ComplianceCheck>> {
@@ -194,64 +193,54 @@ impl ComplianceService {
             transaction_id
         );
 
-        let result = sqlx::query!(
-            r#"
-            SELECT 
-                id as "id!", 
-                transaction_id as "transaction_id!", 
-                source_country as "source_country!", 
-                destination_country as "destination_country!",
-                amount as "amount!", 
-                currency as "currency!", 
-                risk_score as "risk_score!", 
-                status as "status!", 
-                details,
-                created_at as "created_at!", 
-                updated_at as "updated_at!"
-            FROM compliance_checks
-            WHERE transaction_id = ?
-            "#,
-            transaction_id
-        )
-        .fetch_optional(&self.pool)
-        .await
-        .map_err(|e| {
-            error!(
-                "Database error fetching compliance check for transaction {}: {}",
-                transaction_id, e
-            );
-            DbError::from(e)
+        let conn = self.db_conn.get();
+        let conn = conn.lock().map_err(|e| {
+            error!("Failed to acquire database lock: {}", e);
+            DbError::from("Failed to acquire database lock")
         })?;
 
-        if let Some(row) = result {
-            let status = row.status.parse().map_err(|e: String| DbError::from(e))?;
+        let result = conn
+            .query_row(
+                "SELECT id, transaction_id, source_country, destination_country,
+                    amount, currency, risk_score, status, details,
+                    created_at, updated_at
+             FROM compliance_checks
+             WHERE transaction_id = ?1",
+                rusqlite::params![transaction_id],
+                |row| {
+                    let status_str: String = row.get(7)?;
+                    let status = status_str.parse::<ComplianceStatus>().map_err(|_e| {
+                        rusqlite::Error::InvalidColumnType(
+                            7,
+                            "Invalid status".to_string(),
+                            rusqlite::types::Type::Text,
+                        )
+                    })?;
 
-            let check = ComplianceCheck {
-                id: row.id,
-                transaction_id: row.transaction_id,
-                source_country: row.source_country,
-                destination_country: row.destination_country,
-                amount: row.amount,
-                currency: row.currency,
-                risk_score: row.risk_score,
-                status,
-                details: row.details,
-                created_at: row.created_at,
-                updated_at: row.updated_at,
-            };
+                    Ok(ComplianceCheck {
+                        id: row.get(0)?,
+                        transaction_id: row.get(1)?,
+                        source_country: row.get(2)?,
+                        destination_country: row.get(3)?,
+                        amount: row.get(4)?,
+                        currency: row.get(5)?,
+                        risk_score: row.get(6)?,
+                        status,
+                        details: row.get(8)?,
+                        created_at: row.get(9)?,
+                        updated_at: row.get(10)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(|e| {
+                error!(
+                    "Database error fetching compliance check for transaction {}: {}",
+                    transaction_id, e
+                );
+                DbError::from(e.to_string())
+            })?;
 
-            debug!(
-                "Compliance check found: id={}, status={}, risk_score={}",
-                check.id, check.status, check.risk_score
-            );
-
-            Ok(Some(check))
-        } else {
-            debug!(
-                "No compliance check found for transaction: {}",
-                transaction_id
-            );
-            Ok(None)
-        }
+        Ok(result)
     }
 }

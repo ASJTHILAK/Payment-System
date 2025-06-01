@@ -2,41 +2,49 @@ use crate::{
     db::{DbError, DbResult},
     models::Account,
 };
-use sqlx::SqlitePool;
+use std::sync::{Arc, Mutex};
 use tracing::{debug, error};
 
 /// Fetches an account from the database by its ID
-pub async fn get_account(pool: &SqlitePool, account_id: &str) -> DbResult<Account> {
-    sqlx::query_as!(
-        Account,
-        r#"
-        SELECT 
-            id as "id!", 
-            balance as "balance!", 
-            currency as "currency!",
-            country,
-            created_at as "created_at!", 
-            updated_at as "updated_at!"
-        FROM accounts 
-        WHERE id = ?
-        "#,
-        account_id
-    )
-    .fetch_optional(pool)
-    .await
-    .map_err(|e| {
-        error!("Database error fetching account {}: {}", account_id, e);
-        DbError::from(e)
-    })?
-    .ok_or_else(|| {
-        error!("Account not found: {}", account_id);
-        DbError::from(format!("Account not found: {}", account_id))
-    })
+pub fn get_account(conn: &Arc<Mutex<rusqlite::Connection>>, account_id: &str) -> DbResult<Account> {
+    let conn = conn.lock().map_err(|e| {
+        error!("Failed to acquire database lock: {}", e);
+        DbError::from("Failed to acquire database lock")
+    })?;
+
+    let account = conn
+        .query_row(
+            "SELECT id, balance, currency, country, created_at, updated_at 
+         FROM accounts 
+         WHERE id = ?1",
+            rusqlite::params![account_id],
+            |row| {
+                Ok(Account {
+                    id: row.get(0)?,
+                    balance: row.get(1)?,
+                    currency: row.get(2)?,
+                    country: row.get(3)?,
+                    created_at: row.get(4)?,
+                    updated_at: row.get(5)?,
+                })
+            },
+        )
+        .map_err(|e| {
+            error!("Database error fetching account {}: {}", account_id, e);
+            match e {
+                rusqlite::Error::QueryReturnedNoRows => {
+                    DbError::from(format!("Account not found: {}", account_id))
+                }
+                _ => DbError::from(e.to_string()),
+            }
+        })?;
+
+    Ok(account)
 }
 
 /// Validates transaction parameters for both accounts
-pub async fn validate_transaction(
-    pool: &SqlitePool,
+pub fn validate_transaction(
+    conn: &Arc<Mutex<rusqlite::Connection>>,
     from_account_id: &str,
     to_account_id: &str,
     amount: f64,
@@ -47,8 +55,8 @@ pub async fn validate_transaction(
         from_account_id, to_account_id, amount, currency
     );
 
-    let from_account = get_account(pool, from_account_id).await?;
-    let to_account = get_account(pool, to_account_id).await?;
+    let from_account = get_account(conn, from_account_id)?;
+    let to_account = get_account(conn, to_account_id)?;
 
     // Validate currency
     if from_account.currency != currency {
@@ -68,25 +76,20 @@ pub async fn validate_transaction(
 
 /// Updates account balances within a transaction
 #[allow(dead_code)]
-pub async fn update_account_balance(
-    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+pub fn update_account_balance(
+    tx: &rusqlite::Transaction,
     account_id: &str,
     new_balance: f64,
 ) -> DbResult<()> {
-    sqlx::query!(
-        r#"
-        UPDATE accounts 
-        SET balance = ?, updated_at = CURRENT_TIMESTAMP 
-        WHERE id = ?
-        "#,
-        new_balance,
-        account_id
+    tx.execute(
+        "UPDATE accounts 
+        SET balance = ?1, updated_at = CURRENT_TIMESTAMP 
+        WHERE id = ?2",
+        rusqlite::params![new_balance, account_id],
     )
-    .execute(&mut **tx)
-    .await
     .map_err(|e| {
         error!("Failed to update account balance: {}", e);
-        DbError::from(e)
+        DbError::from(e.to_string())
     })?;
 
     Ok(())

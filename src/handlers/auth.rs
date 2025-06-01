@@ -5,18 +5,19 @@ use axum::{
     Json, Router,
 };
 use bcrypt::{hash, verify, DEFAULT_COST};
+use std::sync::Arc;
 use tracing::{debug, error, info};
 use validator::Validate;
 
 use crate::{
-    db::{create_user, get_user_by_username, DbError, DbPool},
+    db::{connection::DbConnection, create_user, get_user_by_username, DbError},
     middleware::auth::JwtAuth,
     models::{
         CreateUserRequest, LoginRequest, LoginResponse, RefreshTokenRequest, TokenResponse, User,
     },
 };
 
-pub fn router() -> Router<(DbPool, JwtAuth)> {
+pub fn router() -> Router<(Arc<DbConnection>, JwtAuth)> {
     Router::new()
         .route("/register", post(register))
         .route("/login", post(login))
@@ -25,7 +26,7 @@ pub fn router() -> Router<(DbPool, JwtAuth)> {
 }
 
 pub async fn register(
-    State((pool, _)): State<(DbPool, JwtAuth)>,
+    State((db_conn, _)): State<(Arc<DbConnection>, JwtAuth)>,
     Json(payload): Json<CreateUserRequest>,
 ) -> Result<Json<User>, (axum::http::StatusCode, String)> {
     use axum::http::StatusCode;
@@ -45,9 +46,8 @@ pub async fn register(
     }
 
     // Check if user exists
-    let existing_user = get_user_by_username(&pool, &payload.username)
-        .await
-        .map_err(|e: DbError| {
+    let existing_user =
+        get_user_by_username(&db_conn.get(), &payload.username).map_err(|e: DbError| {
             error!("Database error checking existing username: {}", e);
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -73,22 +73,26 @@ pub async fn register(
     })?;
 
     // Create user
-    let user = create_user(&pool, &payload.username, &payload.email, &password_hash)
-        .await
-        .map_err(|e: DbError| {
-            error!("Failed to create user {}: {}", payload.username, e);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Failed to create user: {}", e),
-            )
-        })?;
+    let user = create_user(
+        &db_conn.get(),
+        &payload.username,
+        &payload.email,
+        &password_hash,
+    )
+    .map_err(|e: DbError| {
+        error!("Failed to create user {}: {}", payload.username, e);
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Failed to create user: {}", e),
+        )
+    })?;
 
     info!("User registered successfully: {}", user.username);
     Ok(Json(user))
 }
 
 pub async fn login(
-    State((pool, jwt_auth)): State<(DbPool, JwtAuth)>,
+    State((db_conn, jwt_auth)): State<(Arc<DbConnection>, JwtAuth)>,
     Json(payload): Json<LoginRequest>,
 ) -> Result<Json<LoginResponse>, (axum::http::StatusCode, String)> {
     use axum::http::StatusCode;
@@ -99,8 +103,7 @@ pub async fn login(
     );
 
     // Get user
-    let user = get_user_by_username(&pool, &payload.username)
-        .await
+    let user = get_user_by_username(&db_conn.get(), &payload.username)
         .map_err(|e: DbError| {
             error!(
                 "Database error during login attempt for {}: {}",
@@ -155,7 +158,7 @@ pub async fn login(
 }
 
 pub async fn refresh_token(
-    State((_, jwt_auth)): State<(DbPool, JwtAuth)>,
+    State((_, jwt_auth)): State<(Arc<DbConnection>, JwtAuth)>,
     Json(payload): Json<RefreshTokenRequest>,
 ) -> Result<Json<TokenResponse>, (axum::http::StatusCode, String)> {
     debug!("Processing token refresh request");
@@ -177,7 +180,7 @@ pub async fn refresh_token(
 }
 
 pub async fn logout(
-    State((_, jwt_auth)): State<(DbPool, JwtAuth)>,
+    State((_, jwt_auth)): State<(Arc<DbConnection>, JwtAuth)>,
     TypedHeader(Authorization(bearer)): TypedHeader<Authorization<Bearer>>,
 ) -> Result<(), (axum::http::StatusCode, String)> {
     debug!("Processing logout request");

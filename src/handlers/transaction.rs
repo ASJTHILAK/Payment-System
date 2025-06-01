@@ -8,17 +8,19 @@ use serde::Serialize;
 use tracing::{debug, error, info};
 use validator::Validate;
 
+use std::sync::Arc;
+
 use crate::{
     db::{
-        get_account_by_id, get_user_transactions, process_cross_border_transaction,
-        process_transaction, DbError, DbPool,
+        connection::DbConnection, get_account_by_id, get_user_transactions,
+        process_cross_border_transaction, process_transaction, DbError,
     },
     middleware::{auth::JwtAuth, AuthUser},
     models::{CreateTransactionRequest, Transaction},
     services::{compliance::ComplianceService, exchange_rate::ExchangeRateService},
 };
 
-pub fn router() -> Router<(DbPool, JwtAuth)> {
+pub fn router() -> Router<(Arc<DbConnection>, JwtAuth)> {
     Router::new()
         .route("/create", post(create))
         .route("/list", get(list))
@@ -48,7 +50,7 @@ pub struct ExchangeRateResponse {
 }
 
 pub async fn create(
-    State((pool, _)): State<(DbPool, JwtAuth)>,
+    State((db_conn, _)): State<(Arc<DbConnection>, JwtAuth)>,
     auth_user: AuthUser,
     Extension(exchange_rate_service): Extension<ExchangeRateService>,
     Extension(compliance_service): Extension<ComplianceService>,
@@ -72,7 +74,7 @@ pub async fn create(
         // Use the cross-border transaction processing function with potential currency conversion
         debug!("Processing as cross-border payment with potential currency conversion");
         process_cross_border_transaction(
-            &pool,
+            &db_conn.get(),
             &exchange_rate_service,
             &compliance_service,
             &auth_user.user_id,
@@ -82,19 +84,17 @@ pub async fn create(
             true,
             payload.description.as_deref(),
         )
-        .await
     } else {
         // Use the standard transaction processing function
         debug!("Processing as standard domestic payment");
         process_transaction(
-            &pool,
+            &db_conn.get(),
             &auth_user.user_id,
             &payload.to_account_id,
             payload.amount,
             &payload.currency,
             payload.description.as_deref(),
         )
-        .await
     }
     .map_err(|e: DbError| {
         error!("Transaction processing failed: {}", e);
@@ -127,14 +127,13 @@ pub async fn create(
 }
 
 pub async fn list(
-    State((pool, _)): State<(DbPool, JwtAuth)>,
+    State((db_conn, _)): State<(Arc<DbConnection>, JwtAuth)>,
     auth_user: AuthUser,
 ) -> Result<Json<Vec<Transaction>>, String> {
     debug!("Listing transactions for user: {}", auth_user.user_id);
 
-    let transactions = get_user_transactions(&pool, &auth_user.user_id)
-        .await
-        .map_err(|e: DbError| {
+    let transactions =
+        get_user_transactions(&db_conn.get(), &auth_user.user_id).map_err(|e: DbError| {
             error!("Failed to fetch transactions: {}", e);
             format!("Failed to get transactions: {}", e)
         })?;
@@ -165,7 +164,7 @@ pub async fn list(
 }
 
 pub async fn get_transaction_compliance(
-    State((pool, _)): State<(DbPool, JwtAuth)>,
+    State((db_conn, _)): State<(Arc<DbConnection>, JwtAuth)>,
     auth_user: AuthUser,
     Extension(compliance_service): Extension<ComplianceService>,
     Path(transaction_id): Path<String>,
@@ -176,9 +175,8 @@ pub async fn get_transaction_compliance(
     );
 
     // First verify that the transaction belongs to the authenticated user
-    let transactions = get_user_transactions(&pool, &auth_user.user_id)
-        .await
-        .map_err(|e: DbError| {
+    let transactions =
+        get_user_transactions(&db_conn.get(), &auth_user.user_id).map_err(|e: DbError| {
             error!("Failed to fetch transactions: {}", e);
             format!("Failed to get transactions: {}", e)
         })?;
@@ -197,7 +195,6 @@ pub async fn get_transaction_compliance(
     // Fetch compliance information
     let compliance_check = compliance_service
         .get_compliance_check_by_transaction(&transaction_id)
-        .await
         .map_err(|e: DbError| {
             error!("Failed to fetch compliance information: {}", e);
             format!("Compliance check failed: {}", e)
@@ -205,16 +202,14 @@ pub async fn get_transaction_compliance(
         .ok_or_else(|| "No compliance information found for this transaction".to_string())?;
 
     // Get from_account country and to_account country
-    let from_account = get_account_by_id(&pool, &transaction.from_account_id)
-        .await
+    let from_account = get_account_by_id(&db_conn.get(), &transaction.from_account_id)
         .map_err(|e: DbError| {
             error!("Failed to fetch sender account info: {}", e);
             format!("Account lookup failed: {}", e)
         })?
         .ok_or_else(|| "Sender account not found".to_string())?;
 
-    let to_account = get_account_by_id(&pool, &transaction.to_account_id)
-        .await
+    let to_account = get_account_by_id(&db_conn.get(), &transaction.to_account_id)
         .map_err(|e: DbError| {
             error!("Failed to fetch receiver account info: {}", e);
             format!("Account lookup failed: {}", e)
@@ -245,7 +240,7 @@ pub async fn get_transaction_compliance(
 }
 
 pub async fn get_exchange_rates(
-    State((_, _)): State<(DbPool, JwtAuth)>,
+    State((_, _)): State<(Arc<DbConnection>, JwtAuth)>,
     auth_user: AuthUser,
     Extension(exchange_rate_service): Extension<ExchangeRateService>,
     Path(currency): Path<String>,
@@ -275,10 +270,7 @@ pub async fn get_exchange_rates(
         }
 
         // Get the exchange rate
-        match exchange_rate_service
-            .get_exchange_rate(&currency, target_currency)
-            .await
-        {
+        match exchange_rate_service.get_exchange_rate(&currency, target_currency) {
             Ok(rate) => {
                 rates.insert(target_currency.to_string(), rate.rate);
                 if rate.last_updated_at > last_updated {

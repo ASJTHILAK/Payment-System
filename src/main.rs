@@ -3,6 +3,7 @@ mod handlers;
 mod middleware;
 mod models;
 mod services;
+mod utils;
 
 use crate::middleware::{
     auth::JwtAuth,
@@ -11,8 +12,7 @@ use crate::middleware::{
 };
 use axum::{routing::get, Router};
 use dotenv::dotenv;
-use sqlx::sqlite::SqlitePoolOptions;
-use std::{env, net::SocketAddr};
+use std::{env, net::SocketAddr, sync::Arc};
 use tower_http::trace::TraceLayer;
 use tracing::{debug, error, info};
 
@@ -23,19 +23,28 @@ pub async fn create_app() -> Router {
     let database_url = env::var("DATABASE_URL").expect("DATABASE_URL must be set");
     info!("Using database at: {}", database_url);
 
+    // Extract the database path from the URL (assuming sqlite:path format)
+    let db_path = database_url
+        .strip_prefix("sqlite:")
+        .unwrap_or(&database_url);
+    info!("Extracted database path: {}", db_path);
+
+    // Create rusqlite connection that auto-creates DB if not present
+    let db_conn = match crate::db::connection::DbConnection::new(&db_path) {
+        Ok(conn) => {
+            info!("Rusqlite connection established successfully");
+            Arc::new(conn)
+        }
+        Err(e) => {
+            error!("Failed to connect to database with rusqlite: {}", e);
+            std::process::exit(1);
+        }
+    };
+
+    info!("Database connection established and schema created if needed");
+
     let jwt_secret = env::var("JWT_SECRET").expect("JWT_SECRET must be set");
     debug!("JWT secret loaded");
-
-    let pool = SqlitePoolOptions::new()
-        .max_connections(10)
-        .min_connections(1)
-        .acquire_timeout(std::time::Duration::from_secs(30))
-        .idle_timeout(std::time::Duration::from_secs(300))
-        .connect(&database_url)
-        .await
-        .expect("Failed to create pool");
-
-    info!("Database connection pool established");
 
     // Initialize JWT auth
     let jwt_auth = JwtAuth::new(jwt_secret.as_bytes());
@@ -61,8 +70,8 @@ pub async fn create_app() -> Router {
     );
 
     // Initialize services
-    let exchange_rate_service = services::ExchangeRateService::new(pool.clone());
-    let compliance_service = services::ComplianceService::new(pool.clone());
+    let exchange_rate_service = services::ExchangeRateService::new(db_conn.clone());
+    let compliance_service = services::ComplianceService::new(db_conn.clone());
 
     debug!("Services initialized");
 
@@ -108,7 +117,7 @@ pub async fn create_app() -> Router {
         ))
         .layer(axum::Extension(global_ip_limiter))
         .layer(TraceLayer::new_for_http())
-        .with_state((pool, jwt_auth.clone()))
+        .with_state((db_conn, jwt_auth.clone()))
 }
 
 #[tokio::main]
