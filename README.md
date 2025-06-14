@@ -16,6 +16,7 @@ A modern, secure RESTful API for digital payments built with Rust and Axum. Supp
 - **Audit Trail**: Detailed transaction history with original and converted amounts for cross-border payments
 - **Atomicity**: All financial transactions are performed within database transactions to ensure data integrity
 - **Concurrency Control**: Optimistic concurrency control to prevent race conditions during balance updates
+- **Enhanced Retry Mechanism**: Automatic retry system with exponential backoff for handling concurrency conflicts and temporary failures
 
 ## Tech Stack
 
@@ -151,6 +152,39 @@ Cross-border transactions undergo automated compliance checks based on:
   - >0.8: Automatically rejected
 
 Exchange rates are cached for 6 hours to ensure consistent rates during transaction processing while maintaining reasonable accuracy.
+
+## Enhanced Retry Mechanism
+
+The system includes a sophisticated retry mechanism with exponential backoff to handle temporary failures and concurrency conflicts automatically.
+
+### Features
+- **Automatic Retry**: Transactions that fail due to concurrency conflicts are automatically retried
+- **Exponential Backoff**: Delays increase exponentially between retries (100ms, 200ms, 400ms, etc.)
+- **Smart Error Detection**: Only retries appropriate errors (concurrency conflicts, timeouts) while failing fast on validation errors
+- **Jitter Support**: Adds randomization to prevent thundering herd effects
+- **Configurable**: All retry parameters can be customized
+
+### Default Configuration
+- **Max Retries**: 3 attempts
+- **Initial Delay**: 100ms
+- **Backoff Multiplier**: 2.0x
+- **Max Delay**: 10 seconds
+- **Jitter**: 10% randomization
+
+### Retryable Errors
+- Account balance changed during transaction
+- Concurrent update detected
+- Database lock errors
+- Connection timeouts
+- Temporary/transient failures
+
+### Non-Retryable Errors
+- Validation failures
+- Insufficient funds
+- Invalid account IDs
+- Business logic violations
+
+This ensures users don't need to manually retry transactions that fail due to temporary system conditions.
 
 ## Project Structure
 

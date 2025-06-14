@@ -1,4 +1,3 @@
-// src/utils/currency_mapping.rs
 use std::collections::HashMap;
 
 /// Maps currencies to their primary country codes

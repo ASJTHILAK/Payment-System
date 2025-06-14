@@ -11,13 +11,13 @@ use validator::Validate;
 use std::sync::Arc;
 
 use crate::{
-    db::{
-        connection::DbConnection, get_account_by_id, get_user_transactions,
-        process_cross_border_transaction, process_transaction, DbError,
-    },
+    db::{connection::DbConnection, get_account_by_id, get_user_transactions, DbError},
     middleware::{auth::JwtAuth, AuthUser},
     models::{CreateTransactionRequest, Transaction},
-    services::{compliance::ComplianceService, exchange_rate::ExchangeRateService},
+    services::{
+        compliance::ComplianceService, exchange_rate::ExchangeRateService,
+        transaction::TransactionService,
+    },
 };
 
 pub fn router() -> Router<(Arc<DbConnection>, JwtAuth)> {
@@ -67,43 +67,52 @@ pub async fn create(
         return Err(format!("Validation error: {:?}", errors));
     }
 
+    // Create transaction service with retry capabilities
+    let transaction_service = TransactionService::new(db_conn.clone());
+
     // Check if this might be a cross-border payment that needs conversion
     let convert_currency = payload.convert_currency.unwrap_or(false);
 
     let transaction = if convert_currency {
-        // Use the cross-border transaction processing function with potential currency conversion
-        debug!("Processing as cross-border payment with potential currency conversion");
-        process_cross_border_transaction(
-            &db_conn.get(),
-            &exchange_rate_service,
-            &compliance_service,
-            &auth_user.user_id,
-            &payload.to_account_id,
-            payload.amount,
-            &payload.currency,
-            true,
-            payload.description.as_deref(),
-        )
+        // Use the cross-border transaction processing function with potential currency conversion and retry
+        debug!("Processing as cross-border payment with potential currency conversion and retry");
+        transaction_service
+            .process_cross_border_transaction_with_retry(
+                exchange_rate_service,
+                compliance_service,
+                auth_user.user_id.clone(),
+                payload.to_account_id.clone(),
+                payload.amount,
+                payload.currency.clone(),
+                true,
+                payload.description.clone(),
+            )
+            .await
+            .map_err(|e| {
+                error!("Cross-border transaction processing failed: {}", e);
+                format!("Transaction failed: {}", e)
+            })?
     } else {
-        // Use the standard transaction processing function
-        debug!("Processing as standard domestic payment");
-        process_transaction(
-            &db_conn.get(),
-            &auth_user.user_id,
-            &payload.to_account_id,
-            payload.amount,
-            &payload.currency,
-            payload.description.as_deref(),
-        )
-    }
-    .map_err(|e: DbError| {
-        error!("Transaction processing failed: {}", e);
-        format!("Transaction failed: {}", e)
-    })?;
+        // Use the standard transaction processing function with retry
+        debug!("Processing as standard domestic payment with retry");
+        transaction_service
+            .process_transaction_with_retry(
+                auth_user.user_id.clone(),
+                payload.to_account_id.clone(),
+                payload.amount,
+                payload.currency.clone(),
+                payload.description.clone(),
+            )
+            .await
+            .map_err(|e| {
+                error!("Transaction processing failed: {}", e);
+                format!("Transaction failed: {}", e)
+            })?
+    };
 
     if convert_currency && transaction.is_cross_border.unwrap_or(false) {
         info!(
-            "Cross-border transaction completed: id={}, from={}, to={}, amount={} {}, original_amount={} {}",
+            "Cross-border transaction completed with retry: id={}, from={}, to={}, amount={} {}, original_amount={} {}",
             transaction.id,
             auth_user.user_id,
             payload.to_account_id,
@@ -114,7 +123,7 @@ pub async fn create(
         );
     } else {
         info!(
-            "Transaction completed: id={}, from={}, to={}, amount={}, currency={}",
+            "Transaction completed with retry: id={}, from={}, to={}, amount={}, currency={}",
             transaction.id,
             auth_user.user_id,
             payload.to_account_id,

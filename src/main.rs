@@ -72,6 +72,7 @@ pub async fn create_app() -> Router {
     // Initialize services
     let exchange_rate_service = services::ExchangeRateService::new(db_conn.clone());
     let compliance_service = services::ComplianceService::new(db_conn.clone());
+    let transaction_service = services::TransactionService::new(db_conn.clone());
 
     debug!("Services initialized");
 
@@ -108,7 +109,8 @@ pub async fn create_app() -> Router {
                 )
                 .layer(axum::Extension(jwt_auth.clone()))
                 .layer(axum::Extension(exchange_rate_service))
-                .layer(axum::Extension(compliance_service)),
+                .layer(axum::Extension(compliance_service))
+                .layer(axum::Extension(transaction_service)),
         )
         // Apply global IP-based rate limiting
         .layer(axum::middleware::from_fn_with_state(
