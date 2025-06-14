@@ -1,10 +1,17 @@
 openapi: 3.0.0
 info:
   title: Payment System API
-  description: A modern, secure RESTful API for digital payments built with Rust and Axum
+  description: |
+    A modern, secure RESTful API for digital payments built with Rust and Axum.
+    Supports domestic and cross-border payments with automated compliance checks
+    and real-time currency conversion.
+    
+    This API provides comprehensive payment processing capabilities with focus on
+    security, performance, and data integrity.
   version: 1.0.0
   contact:
     name: Developer
+    email: asjthilak@gmail.com
 
 servers:
   - url: http://localhost:3000
@@ -16,6 +23,9 @@ components:
       type: http
       scheme: bearer
       bearerFormat: JWT
+      description: |
+        JWT token obtained from the /api/auth/login or /api/auth/refresh endpoints.
+        The token must be included in the Authorization header with the Bearer prefix.
 
   schemas:
     User:
@@ -251,6 +261,14 @@ components:
         details:
           type: string
           description: Additional information about compliance check results
+      example:
+        transaction_id: "550e8400-e29b-41d4-a716-446655440000"
+        is_cross_border: true
+        source_country: "US"
+        destination_country: "IN"
+        risk_score: 0.45
+        status: "APPROVED"
+        details: "Transaction passes all compliance checks"
 
     ExchangeRateResponse:
       type: object
@@ -263,10 +281,26 @@ components:
           additionalProperties:
             type: number
           description: Exchange rates for different currencies
+          example:
+            USD: 1.0
+            EUR: 0.85
+            GBP: 0.73
+            INR: 74.5
+            SGD: 1.35
+            AED: 3.67
         last_updated_at:
           type: string
           format: date-time
           description: When the rates were last updated
+      example:
+        base_currency: "USD"
+        rates:
+          EUR: 0.85
+          GBP: 0.73
+          INR: 74.5
+          SGD: 1.35
+          AED: 3.67
+        last_updated_at: "2023-01-01T12:00:00Z"
 
     Error:
       type: object

@@ -4,7 +4,7 @@ A modern, secure RESTful API for digital payments built with Rust and Axum. Supp
 
 ## Features
 
-- **User Authentication**: Secure JWT-based authentication system with token refresh capabilities
+- **User Authentication**: Secure JWT-based authentication system with token refresh capabilities and token blacklisting
 - **Account Management**: Create and manage user payment accounts with multi-currency and multi-country support
 - **Transaction Processing**: Process secure domestic and cross-border money transfers with automatic currency conversion
 - **Currency Exchange**: Real-time currency conversion with rate caching and historical rate tracking
@@ -14,15 +14,22 @@ A modern, secure RESTful API for digital payments built with Rust and Axum. Supp
 - **Database**: SQLite persistence with rusqlite for lightweight, embedded database operations with automatic database creation
 - **Rate Limiting**: IP-based rate limiting to prevent abuse and ensure service stability
 - **Audit Trail**: Detailed transaction history with original and converted amounts for cross-border payments
+- **Atomicity**: All financial transactions are performed within database transactions to ensure data integrity
+- **Concurrency Control**: Optimistic concurrency control to prevent race conditions during balance updates
 
 ## Tech Stack
 
 - **Rust**: Memory-safe systems programming language
 - **Axum**: High-performance web framework built on top of Tokio
-- **SQLx**: Async SQL database driver with compile-time query checking
+- **Tokio**: Asynchronous runtime for Rust
+- **Rusqlite**: SQLite database driver with robust error handling
 - **SQLite**: Lightweight embedded database
 - **JWT**: JSON Web Tokens for secure authentication
 - **Bcrypt**: Industry-standard password hashing
+- **Tower**: Middleware framework for request processing
+- **Validator**: Input validation for request data
+- **Serde**: Serialization/deserialization framework
+- **Tracing**: Structured logging
 - **Docker**: Containerization for easy deployment
 
 ## API Endpoints
@@ -159,11 +166,52 @@ payment-system/
 │   ├── error.rs      # Error definitions
 │   ├── lib.rs        # Library exports
 │   └── main.rs       # Application entry point
-├── migrations/       # SQLx database migrations
 ├── tests/            # Integration tests
 └── Dockerfile        # Container configuration
 ```
 
+## Architecture
+
+The system follows a layered architecture with separation of concerns:
+
+1. **API Layer** (handlers): Handles HTTP requests and responses
+2. **Service Layer** (services): Contains business logic for exchange rates, compliance, etc.
+3. **Data Access Layer** (db): Manages database operations
+4. **Model Layer** (models): Defines data structures and validation
+5. **Cross-Cutting Concerns** (middleware, error): Handles authentication, rate limiting, and error handling
+
+Key architectural decisions:
+
+- **Database Access**: Thread-safe access to SQLite using Mutex
+- **Error Handling**: Custom error types with proper HTTP status code mapping
+- **Middleware**: JWT authentication and IP-based rate limiting
+- **Concurrency**: Optimistic concurrency control for financial transactions
+- **Testing**: Integration tests for critical functionality
+
 ## License
 
 This project is licensed under the MIT License.
+
+## Production Considerations and Future Improvements
+
+### Database
+- **Scalability**: For high transaction volumes, consider migrating from SQLite to a production-grade database like PostgreSQL
+- **Connection Pooling**: Implement proper connection pooling for better concurrency handling
+- **Database Migrations**: Add formal migration system for schema version control
+
+### Security
+- **Secrets Management**: Use a proper secrets management solution instead of environment variables
+- **HTTPS**: Implement TLS/SSL for all production deployments
+- **API Keys**: Add more sophisticated API key management for external integrations
+
+### Performance
+- **Caching**: Implement a distributed cache for exchange rates and other frequently accessed data
+- **Asynchronous Processing**: Move compliance checks and notifications to an async task queue
+- **Monitoring**: Add metrics and tracing for system performance monitoring
+
+### Features
+- **Multi-factor Authentication**: Add 2FA support for enhanced security
+- **Webhooks**: Implement webhooks for transaction notifications
+- **Batch Processing**: Support for batch transaction processing
+- **Real Exchange Rates**: Integrate with actual exchange rate providers
+- **Enhanced Compliance**: Connect to external AML/KYC services and sanction lists

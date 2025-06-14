@@ -29,7 +29,9 @@ COPY data.db /app/data.db
 
 # Set environment variables
 ENV DATABASE_URL=sqlite:data.db
-ENV JWT_SECRET="asjthilak"
+# JWT_SECRET should be set at runtime via environment variable
+# Default value is provided for convenience in development only
+ENV JWT_SECRET=changeme_in_production
 ENV PORT=3000
 
 # Expose the port
